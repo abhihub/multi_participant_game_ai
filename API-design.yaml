@@ -1,0 +1,2052 @@
+openapi: 3.1.0
+info:
+  title: Multiplayer AI Games Platform API
+  version: "1.3.0"
+  description: >
+    Combined spec for:
+      (A) Public REST API (customers/devs + host/admin)
+      (B) Internal Moderator AI Adapter API (TTS/STT/Vision) + Decision ingest
+      (C) Typed realtime event envelopes delivered via LiveKit DataChannel topic `game.events.v1`
+
+    ## Changelog v1.3.0
+      - Added floor control: `POST .../actions/floor` + `POST .../actions/floor/release` with `floor.changed` event
+      - Added quiet gate: `voice_rules` in SessionConfig, `quiet.achieved` + `quiet.timeout` events
+      - Added `participants.mute.changed` event for client-side mute UI
+      - Enriched `EvModeratorSpoke`, split into `moderator.speak.started` + `moderator.speak.ended` events
+      - Added `round_id` and `question_id` to `CreateSttStreamRequest` for round context
+
+    ## Changelog v1.2.0
+      - Renamed `advance-question` to `advance-round` (game-agnostic)
+      - Added `POST .../quickdraw/config` for prompt configuration
+      - Added `prompting` phase to QuickDraw round phases
+      - Added `mute_policy` to QuickDrawState, `spoken`/`unmute_at_ms` to EvQuickDrawPrompt
+      - Added vision stream lifecycle API
+
+    ## Changelog v1.1.0
+      - Fixed YAML indentation on mute endpoint
+      - Added `game.winner` and `effect.triggered` events
+      - Enriched `session.ended` with winner + final scores
+      - Added role-based mute/unmute targeting
+      - Added `POST .../actions/trigger-effect` endpoint
+
+servers:
+  - url: https://api.yourco.com
+    description: Public + Engine endpoints
+  - url: http://moderator-internal.yourco.local
+    description: Internal AI adapter endpoints (optional separate service)
+
+security:
+  - ApiKeyAuth: []
+
+tags:
+  - name: Sessions
+  - name: Trivia
+  - name: QuickDraw
+  - name: Admin
+  - name: Floor-Control
+  - name: Observability
+  - name: Webhooks
+  - name: Internal-Control
+  - name: Internal-TTS
+  - name: Internal-STT
+  - name: Internal-Vision
+  - name: Internal-Decisions
+  - name: Health
+
+paths:
+  # ==========================
+  # A) PUBLIC / ENGINE REST API
+  # ==========================
+  /v1/sessions:
+    post:
+      tags: [Sessions]
+      summary: Create a game session
+      operationId: createSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateSessionRequest" }
+      responses:
+        "200":
+          description: Session created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreateSessionResponse" }
+
+  /v1/sessions/{session_id}/participants:token:
+    post:
+      tags: [Sessions]
+      summary: Mint a LiveKit token for a participant
+      operationId: mintParticipantToken
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MintParticipantTokenRequest" }
+      responses:
+        "200":
+          description: Token minted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MintParticipantTokenResponse" }
+
+  /v1/sessions/{session_id}/actions/start:
+    post:
+      tags: [Admin]
+      summary: Start the session
+      operationId: startSession
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      security:
+        - SessionAdminAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StartSessionRequest" }
+      responses:
+        "200":
+          description: Started
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OkStatusResponse" }
+
+  /v1/sessions/{session_id}/actions/pause:
+    post:
+      tags: [Admin]
+      summary: Pause the session
+      operationId: pauseSession
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      security:
+        - SessionAdminAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReasonRequest" }
+      responses:
+        "200":
+          description: Paused
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OkStatusResponse" }
+
+  /v1/sessions/{session_id}/actions/resume:
+    post:
+      tags: [Admin]
+      summary: Resume the session
+      operationId: resumeSession
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      security:
+        - SessionAdminAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReasonRequest" }
+      responses:
+        "200":
+          description: Resumed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OkStatusResponse" }
+
+  /v1/sessions/{session_id}/actions/end:
+    post:
+      tags: [Admin]
+      summary: End the session
+      operationId: endSession
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      security:
+        - SessionAdminAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReasonRequest" }
+      responses:
+        "200":
+          description: Ended
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OkStatusResponse" }
+
+  /v1/sessions/{session_id}/actions/participants/mute:
+    post:
+      tags: [Admin]
+      summary: Mute participants by identity list or role-based targeting
+      operationId: muteParticipants
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      security:
+        - SessionAdminAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ParticipantMuteRequest" }
+      responses:
+        "200":
+          description: Muted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MuteUnmuteResponse" }
+
+  /v1/sessions/{session_id}/actions/participants/unmute:
+    post:
+      tags: [Admin]
+      summary: Unmute participants by identity list or role-based targeting
+      operationId: unmuteParticipants
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      security:
+        - SessionAdminAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ParticipantUnmuteRequest" }
+      responses:
+        "200":
+          description: Unmuted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MuteUnmuteResponse" }
+
+  # ── NEW v1.3.0: Floor control ──
+  /v1/sessions/{session_id}/actions/floor:
+    post:
+      tags: [Floor-Control, Admin]
+      summary: Set floor control mode
+      description: >
+        Semantic layer above mute/unmute. Sets who may speak in the room.
+        Emits a floor.changed event. Auto-expires after duration_ms (if set)
+        and reverts to open. Replaces any active floor hold.
+      operationId: setFloorControl
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      security:
+        - SessionAdminAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FloorControlRequest" }
+      responses:
+        "200":
+          description: Floor control set
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FloorControlResponse" }
+
+  /v1/sessions/{session_id}/actions/floor/release:
+    post:
+      tags: [Floor-Control, Admin]
+      summary: Release floor control (revert to open)
+      operationId: releaseFloorControl
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      security:
+        - SessionAdminAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReasonRequest" }
+      responses:
+        "200":
+          description: Floor released
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OkResponse" }
+
+  /v1/sessions/{session_id}/actions/override-score:
+    post:
+      tags: [Admin]
+      summary: Override score (delta) for a participant
+      operationId: overrideScore
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      security:
+        - SessionAdminAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OverrideScoreRequest" }
+      responses:
+        "200":
+          description: Score updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OkStatusResponse" }
+
+  /v1/sessions/{session_id}/actions/skip:
+    post:
+      tags: [Admin]
+      summary: Skip current question/round
+      operationId: skip
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      security:
+        - SessionAdminAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SkipRequest" }
+      responses:
+        "200":
+          description: Skipped
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OkStatusResponse" }
+
+  /v1/sessions/{session_id}/actions/trigger-effect:
+    post:
+      tags: [Admin]
+      summary: Trigger a visual/audio effect broadcast
+      operationId: triggerEffect
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      security:
+        - SessionAdminAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TriggerEffectRequest" }
+      responses:
+        "200":
+          description: Effect triggered
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OkResponse" }
+
+  /v1/sessions/{session_id}/trivia/topic:
+    post:
+      tags: [Trivia, Admin]
+      summary: Set trivia topic and question plan
+      operationId: setTriviaTopic
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      security:
+        - SessionAdminAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SetTriviaTopicRequest" }
+      responses:
+        "200":
+          description: Topic set
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OkResponse" }
+
+  /v1/sessions/{session_id}/quickdraw/config:
+    post:
+      tags: [QuickDraw, Admin]
+      summary: Configure QuickDraw prompt generation
+      operationId: setQuickDrawConfig
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      security:
+        - SessionAdminAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SetQuickDrawConfigRequest" }
+      responses:
+        "200":
+          description: Config set
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OkResponse" }
+
+  /v1/sessions/{session_id}/snapshot:
+    get:
+      tags: [Sessions]
+      summary: Get current session snapshot
+      operationId: getSnapshot
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      responses:
+        "200":
+          description: Snapshot
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SnapshotResponse" }
+
+  /v1/sessions/{session_id}/events:
+    get:
+      tags: [Observability]
+      summary: Get session event log
+      operationId: getEvents
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+        - name: after_seq
+          in: query
+          schema: { type: integer, minimum: 0 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 200 }
+      responses:
+        "200":
+          description: Event page
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EventLogResponse" }
+
+  /v1/webhooks:
+    post:
+      tags: [Webhooks]
+      summary: Register a webhook endpoint
+      operationId: createWebhook
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateWebhookRequest" }
+      responses:
+        "200":
+          description: Webhook registered
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WebhookResponse" }
+
+  # ==================================
+  # B) INTERNAL MODERATOR ADAPTER APIS
+  # ==================================
+  /internal/v1/health:
+    get:
+      tags: [Health]
+      summary: Health check
+      operationId: internalHealth
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthResponse" }
+
+  /internal/v1/sessions/{session_id}/attach:
+    post:
+      tags: [Internal-Control]
+      summary: Attach moderator to session
+      operationId: attachModerator
+      security:
+        - InternalAuth: []
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AttachModeratorRequest" }
+      responses:
+        "200":
+          description: Attached
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AttachModeratorResponse" }
+
+  /internal/v1/sessions/{session_id}/detach:
+    post:
+      tags: [Internal-Control]
+      summary: Detach moderator from session
+      operationId: detachModerator
+      security:
+        - InternalAuth: []
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReasonRequest" }
+      responses:
+        "200":
+          description: Detached
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OkResponse" }
+
+  /internal/v1/sessions/{session_id}/advance-round:
+    post:
+      tags: [Internal-Control]
+      summary: Advance to the next round (question or drawing prompt)
+      description: >
+        Game-agnostic round advancement. For trivia: next question. For quick_draw:
+        next prompt. If win condition met, emits game.winner + session.ended instead.
+      operationId: advanceRound
+      security:
+        - InternalAuth: []
+      parameters:
+        - $ref: "#/components/parameters/SessionId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                delay_ms: { type: integer, minimum: 0, maximum: 30000, default: 0 }
+      responses:
+        "200":
+          description: Advanced or session ended
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdvanceRoundResponse" }
+
+  /internal/v1/tts/speak:
+    post:
+      tags: [Internal-TTS]
+      summary: Synthesize speech audio for moderator
+      operationId: ttsSpeak
+      security:
+        - InternalAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TtsSpeakRequest" }
+      responses:
+        "200":
+          description: TTS job accepted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TtsSpeakResponse" }
+
+  /internal/v1/tts/jobs/{job_id}:
+    get:
+      tags: [Internal-TTS]
+      summary: Get TTS job status and audio reference
+      operationId: getTtsJob
+      security:
+        - InternalAuth: []
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "200":
+          description: TTS job
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TtsJob" }
+
+  /internal/v1/stt/streams:
+    post:
+      tags: [Internal-STT]
+      summary: Create an STT stream (per participant)
+      operationId: createSttStream
+      security:
+        - InternalAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateSttStreamRequest" }
+      responses:
+        "200":
+          description: Stream created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreateSttStreamResponse" }
+
+  /internal/v1/stt/streams/{stream_id}/feed:
+    post:
+      tags: [Internal-STT]
+      summary: Feed audio frames into STT stream
+      operationId: feedSttAudio
+      security:
+        - InternalAuth: []
+      parameters:
+        - $ref: "#/components/parameters/StreamId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SttFeedRequest" }
+      responses:
+        "200":
+          description: Accepted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OkResponse" }
+
+  /internal/v1/stt/streams/{stream_id}/close:
+    post:
+      tags: [Internal-STT]
+      summary: Close STT stream
+      operationId: closeSttStream
+      security:
+        - InternalAuth: []
+      parameters:
+        - $ref: "#/components/parameters/StreamId"
+      responses:
+        "200":
+          description: Closed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OkResponse" }
+
+  /internal/v1/stt/streams/{stream_id}/results:
+    get:
+      tags: [Internal-STT]
+      summary: Get buffered STT results
+      operationId: getSttResults
+      security:
+        - InternalAuth: []
+      parameters:
+        - $ref: "#/components/parameters/StreamId"
+        - name: after_seq
+          in: query
+          schema: { type: integer, minimum: 0 }
+      responses:
+        "200":
+          description: Results page
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SttResultsResponse" }
+
+  /internal/v1/vision/paper-detect:
+    post:
+      tags: [Internal-Vision]
+      summary: Detect paper-like regions (one-shot)
+      operationId: visionPaperDetect
+      security:
+        - InternalAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VisionPaperDetectRequest" }
+      responses:
+        "200":
+          description: Detection
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VisionPaperDetectResponse" }
+
+  /internal/v1/vision/quickdraw-judge:
+    post:
+      tags: [Internal-Vision]
+      summary: Judge drawing vs prompt (one-shot)
+      operationId: visionQuickDrawJudge
+      security:
+        - InternalAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VisionQuickDrawJudgeRequest" }
+      responses:
+        "200":
+          description: Judgment
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VisionQuickDrawJudgeResponse" }
+
+  /internal/v1/vision/streams:
+    post:
+      tags: [Internal-Vision]
+      summary: Create vision stream for continuous frame analysis
+      operationId: createVisionStream
+      security:
+        - InternalAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateVisionStreamRequest" }
+      responses:
+        "200":
+          description: Stream created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreateVisionStreamResponse" }
+
+  /internal/v1/vision/streams/{vision_stream_id}/feed:
+    post:
+      tags: [Internal-Vision]
+      summary: Feed video frames into vision stream
+      operationId: feedVisionFrame
+      security:
+        - InternalAuth: []
+      parameters:
+        - $ref: "#/components/parameters/VisionStreamId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VisionFeedRequest" }
+      responses:
+        "200":
+          description: Accepted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OkResponse" }
+
+  /internal/v1/vision/streams/{vision_stream_id}/results:
+    get:
+      tags: [Internal-Vision]
+      summary: Get buffered vision results
+      operationId: getVisionResults
+      security:
+        - InternalAuth: []
+      parameters:
+        - $ref: "#/components/parameters/VisionStreamId"
+        - name: after_seq
+          in: query
+          schema: { type: integer, minimum: 0 }
+      responses:
+        "200":
+          description: Results page
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VisionResultsResponse" }
+
+  /internal/v1/vision/streams/{vision_stream_id}/close:
+    post:
+      tags: [Internal-Vision]
+      summary: Close vision stream
+      operationId: closeVisionStream
+      security:
+        - InternalAuth: []
+      parameters:
+        - $ref: "#/components/parameters/VisionStreamId"
+      responses:
+        "200":
+          description: Closed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OkResponse" }
+
+  /internal/v1/decisions/trivia-answer:
+    post:
+      tags: [Internal-Decisions]
+      summary: Ingest trivia answer detection
+      operationId: ingestTriviaAnswerDecision
+      security:
+        - InternalAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TriviaAnswerDecision" }
+      responses:
+        "200":
+          description: Recorded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OkResponse" }
+
+  /internal/v1/decisions/quickdraw-correct:
+    post:
+      tags: [Internal-Decisions]
+      summary: Ingest Quick Draw correct detection
+      operationId: ingestQuickDrawCorrectDecision
+      security:
+        - InternalAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/QuickDrawCorrectDecision" }
+      responses:
+        "200":
+          description: Recorded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OkResponse" }
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: API_KEY
+    SessionAdminAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: SESSION_ADMIN_TOKEN
+    InternalAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: INTERNAL_TOKEN
+
+  parameters:
+    SessionId:
+      name: session_id
+      in: path
+      required: true
+      schema: { type: string, pattern: "^sess_[A-Za-z0-9_\\-]+$" }
+    JobId:
+      name: job_id
+      in: path
+      required: true
+      schema: { type: string, pattern: "^job_[A-Za-z0-9_\\-]+$" }
+    StreamId:
+      name: stream_id
+      in: path
+      required: true
+      schema: { type: string, pattern: "^stt_[A-Za-z0-9_\\-]+$" }
+    VisionStreamId:
+      name: vision_stream_id
+      in: path
+      required: true
+      schema: { type: string, pattern: "^vis_[A-Za-z0-9_\\-]+$" }
+
+  schemas:
+    # ===============
+    # Shared enums
+    # ===============
+    GameType:
+      type: string
+      enum: [trivia, quick_draw]
+    SessionStatus:
+      type: string
+      enum: [created, running, paused, ended, error]
+    ParticipantRole:
+      type: string
+      enum: [host, admin, player, spectator, moderator]
+    DebugEventsMode:
+      type: string
+      enum: [none, host_only, all]
+    EvidenceMode:
+      type: string
+      enum: [off, winner_only, all_correct_candidates]
+    Difficulty:
+      type: string
+      enum: [easy, medium, hard, mixed]
+    FloorMode:
+      type: string
+      enum: [open, moderator_only, roles_only]
+
+    WinCondition:
+      type: object
+      required: [type]
+      properties:
+        type: { type: string, enum: [first_to_points] }
+        points: { type: integer, minimum: 1, maximum: 100, default: 5 }
+
+    # ── NEW v1.3.0: Voice rules for quiet gate ──
+    VoiceRules:
+      type: object
+      description: >
+        Audio discipline rules enforced by the engine. Controls the quiet
+        gate (require silence before prompts) and noise thresholds.
+      properties:
+        require_quiet_before_prompt:
+          type: boolean
+          default: true
+          description: If true, engine waits for silence before delivering a question/prompt.
+        quiet_ms:
+          type: integer
+          minimum: 200
+          maximum: 10000
+          default: 1000
+          description: Continuous silence (ms) required to satisfy the quiet gate.
+        max_wait_ms:
+          type: integer
+          minimum: 1000
+          maximum: 30000
+          default: 8000
+          description: >
+            Max time (ms) to wait for quiet. If exceeded, emits quiet.timeout
+            and the moderator can force-mute or warn.
+        noise_threshold_db:
+          type: number
+          minimum: -80
+          maximum: 0
+          default: -40
+          description: >
+            Audio level (dBFS) below which a participant is considered silent.
+            Levels above this during the quiet gate count as noise.
+
+    # ── NEW v1.3.0: Floor control schemas ──
+    FloorControlRequest:
+      type: object
+      required: [mode]
+      properties:
+        mode:
+          $ref: "#/components/schemas/FloorMode"
+        allowed_roles:
+          type: array
+          items: { $ref: "#/components/schemas/ParticipantRole" }
+          description: >
+            Which roles may speak. Only used when mode is roles_only.
+        allowed_identities:
+          type: array
+          items: { type: string }
+          description: >
+            Explicit identities that may speak (additive with allowed_roles).
+        duration_ms:
+          type: integer
+          minimum: 0
+          maximum: 300000
+          nullable: true
+          description: >
+            Auto-release after this duration (ms). Null = hold until explicit release.
+        reason:
+          type: string
+          maxLength: 200
+          nullable: true
+
+    FloorControlResponse:
+      type: object
+      required: [ok, floor]
+      properties:
+        ok: { type: boolean, enum: [true] }
+        floor:
+          $ref: "#/components/schemas/FloorState"
+
+    FloorState:
+      type: object
+      required: [mode]
+      description: Current floor control state (also embedded in snapshots).
+      properties:
+        mode: { $ref: "#/components/schemas/FloorMode" }
+        allowed_roles:
+          type: array
+          nullable: true
+          items: { $ref: "#/components/schemas/ParticipantRole" }
+        allowed_identities:
+          type: array
+          nullable: true
+          items: { type: string }
+        held_by:
+          type: string
+          nullable: true
+          description: Identity that requested the floor hold.
+        expires_at_ms:
+          type: integer
+          minimum: 0
+          nullable: true
+          description: Absolute timestamp when floor auto-releases. Null = indefinite.
+
+    ParticipantMuteRequest:
+      type: object
+      description: >
+        Supply EITHER participant_identities or target_roles.
+        participant_identities takes precedence if both provided.
+      properties:
+        participant_identities:
+          type: array
+          minItems: 1
+          items: { type: string }
+        target_roles:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/ParticipantRole" }
+        exclude_roles:
+          type: array
+          items: { $ref: "#/components/schemas/ParticipantRole" }
+        reason: { type: string, maxLength: 200, nullable: true }
+        duration_ms: { type: integer, minimum: 0, maximum: 600000, nullable: true }
+
+    ParticipantUnmuteRequest:
+      type: object
+      properties:
+        participant_identities:
+          type: array
+          minItems: 1
+          items: { type: string }
+        target_roles:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/ParticipantRole" }
+        exclude_roles:
+          type: array
+          items: { $ref: "#/components/schemas/ParticipantRole" }
+        reason: { type: string, maxLength: 200, nullable: true }
+
+    MuteUnmuteResponse:
+      type: object
+      required: [ok, affected_identities]
+      properties:
+        ok: { type: boolean, enum: [true] }
+        affected_identities: { type: array, items: { type: string } }
+
+    TriggerEffectRequest:
+      type: object
+      required: [effect]
+      properties:
+        effect: { type: string, enum: [confetti, spotlight, shake, flash, custom] }
+        target_identity: { type: string, nullable: true }
+        data: { type: object, additionalProperties: true }
+        duration_ms: { type: integer, minimum: 500, maximum: 30000, default: 5000 }
+
+    AdvanceRoundResponse:
+      type: object
+      required: [ok, action]
+      properties:
+        ok: { type: boolean, enum: [true] }
+        action: { type: string, enum: [advanced, session_ended] }
+        round_index: { type: integer, minimum: 0, nullable: true }
+
+    # ===============
+    # Public: Sessions
+    # ===============
+    CreateSessionRequest:
+      type: object
+      required: [game, livekit]
+      properties:
+        game: { $ref: "#/components/schemas/GameType" }
+        livekit: { $ref: "#/components/schemas/LiveKitRoomRef" }
+        config: { $ref: "#/components/schemas/SessionConfig" }
+        metadata: { type: object, additionalProperties: true }
+
+    CreateSessionResponse:
+      type: object
+      required: [session_id, game, status, livekit, tokens, realtime]
+      properties:
+        session_id: { type: string, pattern: "^sess_[A-Za-z0-9_\\-]+$" }
+        game: { $ref: "#/components/schemas/GameType" }
+        status: { $ref: "#/components/schemas/SessionStatus" }
+        livekit: { $ref: "#/components/schemas/LiveKitRoomRef" }
+        tokens: { $ref: "#/components/schemas/SessionTokens" }
+        realtime: { $ref: "#/components/schemas/RealtimeConfig" }
+
+    LiveKitRoomRef:
+      type: object
+      required: [room_name]
+      properties:
+        room_name: { type: string, minLength: 1 }
+        room_region: { type: string, nullable: true }
+
+    # ── UPDATED v1.3.0: added voice_rules ──
+    SessionConfig:
+      type: object
+      properties:
+        max_players: { type: integer, minimum: 2, maximum: 50, default: 6 }
+        language: { type: string, default: "en-US" }
+        moderator_voice: { type: string, default: "default" }
+        win_condition: { $ref: "#/components/schemas/WinCondition" }
+        voice_rules: { $ref: "#/components/schemas/VoiceRules" }
+        debug_events: { $ref: "#/components/schemas/DebugEventsMode" }
+        evidence_mode: { $ref: "#/components/schemas/EvidenceMode" }
+        privacy: { $ref: "#/components/schemas/PrivacyConfig" }
+
+    PrivacyConfig:
+      type: object
+      properties:
+        store_audio: { type: boolean, default: false }
+        store_frames: { type: boolean, default: true }
+        retention_days: { type: integer, minimum: 0, maximum: 365, default: 7 }
+
+    SessionTokens:
+      type: object
+      required: [host_token, moderator_token, session_admin_token]
+      properties:
+        host_token: { type: string }
+        moderator_token: { type: string }
+        session_admin_token: { type: string }
+
+    RealtimeConfig:
+      type: object
+      required: [transport, topic]
+      properties:
+        transport: { type: string, enum: [livekit_datachannel] }
+        topic: { type: string, enum: ["game.events.v1"] }
+
+    MintParticipantTokenRequest:
+      type: object
+      required: [identity, role]
+      properties:
+        identity: { type: string, minLength: 1 }
+        display_name: { type: string }
+        role: { $ref: "#/components/schemas/ParticipantRole" }
+        metadata: { type: object, additionalProperties: true }
+
+    MintParticipantTokenResponse:
+      type: object
+      required: [livekit_token, participant]
+      properties:
+        livekit_token: { type: string }
+        participant: { $ref: "#/components/schemas/Participant" }
+
+    Participant:
+      type: object
+      required: [identity, role]
+      properties:
+        identity: { type: string }
+        display_name: { type: string }
+        role: { $ref: "#/components/schemas/ParticipantRole" }
+        score: { type: integer, default: 0 }
+        muted: { type: boolean, default: false }
+        joined_at_ms: { type: integer, minimum: 0, nullable: true }
+        metadata: { type: object, additionalProperties: true }
+
+    StartSessionRequest:
+      type: object
+      properties:
+        mode: { type: string, enum: [auto], default: auto }
+        lobby_grace_seconds: { type: integer, minimum: 0, maximum: 300, default: 10 }
+
+    ReasonRequest:
+      type: object
+      properties:
+        reason: { type: string, maxLength: 200 }
+
+    OverrideScoreRequest:
+      type: object
+      required: [participant_identity, delta]
+      properties:
+        participant_identity: { type: string }
+        delta: { type: integer, minimum: -100, maximum: 100 }
+        reason: { type: string, maxLength: 200 }
+
+    SkipRequest:
+      type: object
+      required: [scope]
+      properties:
+        scope: { type: string, enum: [current_question, current_round] }
+        reason: { type: string, maxLength: 200 }
+
+    SetTriviaTopicRequest:
+      type: object
+      required: [topic]
+      properties:
+        topic: { type: string, minLength: 1, maxLength: 120 }
+        difficulty: { $ref: "#/components/schemas/Difficulty" }
+        question_count: { type: integer, minimum: 1, maximum: 50, default: 10 }
+
+    SetQuickDrawConfigRequest:
+      type: object
+      properties:
+        category: { type: string, minLength: 1, maxLength: 120, nullable: true }
+        difficulty: { $ref: "#/components/schemas/Difficulty" }
+        prompt_count: { type: integer, minimum: 1, maximum: 50, default: 10 }
+        round_duration_ms: { type: integer, minimum: 5000, maximum: 600000, default: 25000 }
+
+    # ── UPDATED v1.3.0: added floor to snapshot ──
+    SnapshotResponse:
+      type: object
+      required: [session_id, game, status, sequence, state]
+      properties:
+        session_id: { type: string }
+        game: { $ref: "#/components/schemas/GameType" }
+        status: { $ref: "#/components/schemas/SessionStatus" }
+        sequence: { type: integer, minimum: 0 }
+        floor: { $ref: "#/components/schemas/FloorState" }
+        state:
+          oneOf:
+            - $ref: "#/components/schemas/TriviaSnapshotState"
+            - $ref: "#/components/schemas/QuickDrawSnapshotState"
+
+    BaseSnapshotState:
+      type: object
+      required: [participants, round]
+      properties:
+        participants:
+          type: array
+          items: { $ref: "#/components/schemas/Participant" }
+        round: { $ref: "#/components/schemas/RoundRef" }
+
+    RoundRef:
+      type: object
+      required: [round_id, phase, ends_at_ms]
+      properties:
+        round_id: { type: string }
+        phase: { type: string }
+        ends_at_ms: { type: integer, minimum: 0 }
+
+    TriviaSnapshotState:
+      allOf:
+        - $ref: "#/components/schemas/BaseSnapshotState"
+        - type: object
+          required: [trivia]
+          properties:
+            round:
+              allOf:
+                - $ref: "#/components/schemas/RoundRef"
+                - type: object
+                  properties:
+                    phase: { type: string, enum: [lobby, asking, listening, judging, reveal, ended] }
+            trivia: { $ref: "#/components/schemas/TriviaState" }
+
+    TriviaState:
+      type: object
+      required: [topic, question_index]
+      properties:
+        topic: { type: string }
+        difficulty: { $ref: "#/components/schemas/Difficulty" }
+        question_index: { type: integer, minimum: 0 }
+        current_question: { $ref: "#/components/schemas/TriviaQuestionPublic" }
+        mute_policy:
+          type: object
+          properties:
+            muted_during_tts: { type: boolean, default: true }
+            unmute_at_ms: { type: integer, minimum: 0, nullable: true }
+
+    TriviaQuestionPublic:
+      type: object
+      required: [question_id, prompt, answer_window_ms]
+      properties:
+        question_id: { type: string }
+        prompt: { type: string }
+        answer_window_ms: { type: integer, minimum: 500, maximum: 60000 }
+        spoken: { type: boolean, default: true }
+
+    QuickDrawSnapshotState:
+      allOf:
+        - $ref: "#/components/schemas/BaseSnapshotState"
+        - type: object
+          required: [quickdraw]
+          properties:
+            round:
+              allOf:
+                - $ref: "#/components/schemas/RoundRef"
+                - type: object
+                  properties:
+                    phase: { type: string, enum: [lobby, prompting, running, judging, ended] }
+            quickdraw: { $ref: "#/components/schemas/QuickDrawState" }
+
+    QuickDrawState:
+      type: object
+      required: [prompt]
+      properties:
+        prompt: { type: string }
+        category: { type: string, nullable: true }
+        difficulty: { $ref: "#/components/schemas/Difficulty" }
+        prompt_index: { type: integer, minimum: 0 }
+        round_duration_ms: { type: integer, minimum: 1000, maximum: 600000, default: 25000 }
+        mute_policy:
+          type: object
+          properties:
+            muted_during_tts: { type: boolean, default: true }
+            unmute_at_ms: { type: integer, minimum: 0, nullable: true }
+        detections:
+          type: array
+          nullable: true
+          items: { $ref: "#/components/schemas/QuickDrawDetection" }
+
+    QuickDrawDetection:
+      type: object
+      required: [participant_identity, frame_time_ms, confidence]
+      properties:
+        participant_identity: { type: string }
+        frame_time_ms: { type: integer, minimum: 0 }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        evidence: { $ref: "#/components/schemas/EvidenceRef" }
+
+    EvidenceRef:
+      type: object
+      properties:
+        frame_id: { type: string, nullable: true }
+        url: { type: string, format: uri, nullable: true }
+
+    EventLogResponse:
+      type: object
+      required: [session_id, events]
+      properties:
+        session_id: { type: string }
+        events:
+          type: array
+          items: { $ref: "#/components/schemas/TypedGameEventEnvelope" }
+        next_after_seq: { type: integer, nullable: true }
+
+    CreateWebhookRequest:
+      type: object
+      required: [url, events]
+      properties:
+        url: { type: string, format: uri }
+        events:
+          type: array
+          items:
+            type: string
+            enum:
+              - session.started
+              - session.ended
+              - round.ended
+              - score.updated
+              - game.winner
+              - effect.triggered
+              - floor.changed
+              - participants.mute.changed
+              - error.raised
+        secret: { type: string, nullable: true }
+
+    WebhookResponse:
+      type: object
+      required: [webhook_id, url, events]
+      properties:
+        webhook_id: { type: string }
+        url: { type: string, format: uri }
+        events: { type: array, items: { type: string } }
+
+    OkResponse:
+      type: object
+      required: [ok]
+      properties:
+        ok: { type: boolean, enum: [true] }
+
+    OkStatusResponse:
+      type: object
+      required: [ok, status]
+      properties:
+        ok: { type: boolean, enum: [true] }
+        status: { $ref: "#/components/schemas/SessionStatus" }
+
+    HealthResponse:
+      type: object
+      required: [ok]
+      properties:
+        ok: { type: boolean, enum: [true] }
+        version: { type: string }
+        uptime_seconds: { type: integer, minimum: 0 }
+
+    AttachModeratorRequest:
+      type: object
+      required: [livekit, realtime]
+      properties:
+        livekit:
+          type: object
+          required: [room_name, moderator_token]
+          properties:
+            room_name: { type: string }
+            moderator_token: { type: string }
+            region: { type: string, nullable: true }
+        realtime:
+          type: object
+          required: [topic]
+          properties:
+            topic: { type: string, enum: ["game.events.v1"] }
+        game: { $ref: "#/components/schemas/GameType" }
+        config: { type: object, additionalProperties: true }
+
+    AttachModeratorResponse:
+      type: object
+      required: [ok, moderator_identity]
+      properties:
+        ok: { type: boolean, enum: [true] }
+        moderator_identity: { type: string }
+        joined_at_ms: { type: integer, minimum: 0 }
+
+    # ======================
+    # Internal: TTS
+    # ======================
+    TtsSpeakRequest:
+      type: object
+      required: [session_id, text]
+      properties:
+        session_id: { type: string }
+        text: { type: string, minLength: 1, maxLength: 2000 }
+        language: { type: string, default: "en-US" }
+        voice: { type: string, default: "default" }
+        # ── NEW v1.3.0: speak_mode for event enrichment ──
+        speak_mode:
+          type: string
+          enum: [question, warning, reveal, announcement, freeform]
+          default: freeform
+          description: >
+            Semantic tag for this utterance. Propagated into
+            moderator.speak.started/ended events so clients know
+            what kind of speech is happening (for audio ducking, UI cues, etc.).
+        rate: { type: number, minimum: 0.5, maximum: 2.0, default: 1.0 }
+        pitch: { type: number, minimum: -20, maximum: 20, default: 0 }
+        output:
+          type: object
+          properties:
+            codec: { type: string, enum: [pcm_s16le], default: pcm_s16le }
+            sample_rate_hz: { type: integer, enum: [16000, 24000, 48000], default: 48000 }
+            channels: { type: integer, enum: [1], default: 1 }
+
+    TtsSpeakResponse:
+      type: object
+      required: [job_id, status]
+      properties:
+        job_id: { type: string, pattern: "^job_[A-Za-z0-9_\\-]+$" }
+        # ── NEW v1.3.0: speak_id for correlation ──
+        speak_id:
+          type: string
+          pattern: "^spk_[A-Za-z0-9_\\-]+$"
+          description: >
+            Unique ID for this speak action. Used to correlate
+            moderator.speak.started and moderator.speak.ended events.
+        status: { type: string, enum: [queued, running, done, error] }
+
+    TtsJob:
+      type: object
+      required: [job_id, status]
+      properties:
+        job_id: { type: string }
+        status: { type: string, enum: [queued, running, done, error] }
+        error: { type: string, nullable: true }
+        audio: { $ref: "#/components/schemas/AudioRef" }
+
+    AudioRef:
+      type: object
+      properties:
+        content_type: { type: string, enum: [audio/wav, audio/pcm] }
+        url: { type: string, format: uri, nullable: true }
+        bytes_base64: { type: string, nullable: true }
+        duration_ms: { type: integer, minimum: 0 }
+
+    # ======================
+    # Internal: STT
+    # ======================
+    # ── UPDATED v1.3.0: added round_id, question_id ──
+    CreateSttStreamRequest:
+      type: object
+      required: [session_id, participant_identity]
+      properties:
+        session_id: { type: string }
+        participant_identity: { type: string }
+        round_id:
+          type: string
+          nullable: true
+          description: >
+            Associates this STT stream with a specific game round.
+            Makes results and decision attribution automatic.
+        question_id:
+          type: string
+          nullable: true
+          description: >
+            Associates this STT stream with a specific question (trivia).
+            Useful for first-correct-wins attribution and replay.
+        language: { type: string, default: "en-US" }
+        audio:
+          type: object
+          required: [codec, sample_rate_hz, channels]
+          properties:
+            codec: { type: string, enum: [pcm_s16le] }
+            sample_rate_hz: { type: integer, enum: [16000, 24000, 48000], default: 48000 }
+            channels: { type: integer, enum: [1], default: 1 }
+        callbacks:
+          type: object
+          properties:
+            result_url: { type: string, format: uri, nullable: true }
+
+    CreateSttStreamResponse:
+      type: object
+      required: [stream_id, status]
+      properties:
+        stream_id: { type: string, pattern: "^stt_[A-Za-z0-9_\\-]+$" }
+        status: { type: string, enum: [open] }
+
+    SttFeedRequest:
+      type: object
+      required: [frames]
+      properties:
+        frames:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/AudioFrame" }
+
+    AudioFrame:
+      type: object
+      required: [ts_ms, bytes_base64]
+      properties:
+        ts_ms: { type: integer, minimum: 0 }
+        bytes_base64: { type: string }
+        is_speech: { type: boolean, nullable: true }
+
+    SttResultsResponse:
+      type: object
+      required: [stream_id, results]
+      properties:
+        stream_id: { type: string }
+        results:
+          type: array
+          items: { $ref: "#/components/schemas/SttResult" }
+        next_after_seq: { type: integer, nullable: true }
+
+    SttResult:
+      type: object
+      required: [seq, ts_ms, is_final, text, confidence]
+      properties:
+        seq: { type: integer, minimum: 0 }
+        ts_ms: { type: integer, minimum: 0 }
+        is_final: { type: boolean }
+        text: { type: string }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        word_timing:
+          type: array
+          nullable: true
+          items: { $ref: "#/components/schemas/WordTiming" }
+
+    WordTiming:
+      type: object
+      required: [word, start_ms, end_ms]
+      properties:
+        word: { type: string }
+        start_ms: { type: integer, minimum: 0 }
+        end_ms: { type: integer, minimum: 0 }
+
+    # ======================
+    # Internal: Vision
+    # ======================
+    VisionPaperDetectRequest:
+      type: object
+      required: [session_id, participant_identity, image]
+      properties:
+        session_id: { type: string }
+        participant_identity: { type: string }
+        image: { $ref: "#/components/schemas/ImageRef" }
+        hints:
+          type: object
+          properties:
+            max_regions: { type: integer, minimum: 1, maximum: 5, default: 2 }
+
+    VisionPaperDetectResponse:
+      type: object
+      required: [regions]
+      properties:
+        regions:
+          type: array
+          items: { $ref: "#/components/schemas/PaperRegion" }
+
+    PaperRegion:
+      type: object
+      required: [bbox, quad, quality]
+      properties:
+        bbox: { $ref: "#/components/schemas/BBox" }
+        quad:
+          type: array
+          minItems: 4
+          maxItems: 4
+          items: { $ref: "#/components/schemas/Point" }
+        quality:
+          type: object
+          required: [blur_score, motion_score, size_ratio]
+          properties:
+            blur_score: { type: number }
+            motion_score: { type: number }
+            size_ratio: { type: number, minimum: 0, maximum: 1 }
+
+    VisionQuickDrawJudgeRequest:
+      type: object
+      required: [session_id, participant_identity, prompt, image]
+      properties:
+        session_id: { type: string }
+        participant_identity: { type: string }
+        prompt: { type: string }
+        image: { $ref: "#/components/schemas/ImageRef" }
+        crop:
+          type: object
+          properties:
+            quad:
+              type: array
+              minItems: 4
+              maxItems: 4
+              items: { $ref: "#/components/schemas/Point" }
+
+    VisionQuickDrawJudgeResponse:
+      type: object
+      required: [correct, confidence]
+      properties:
+        correct: { type: boolean }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        rationale: { type: string, nullable: true }
+
+    CreateVisionStreamRequest:
+      type: object
+      required: [session_id, participant_identity, prompt]
+      properties:
+        session_id: { type: string }
+        participant_identity: { type: string }
+        prompt: { type: string }
+        sample_fps: { type: number, minimum: 0.5, maximum: 10, default: 3 }
+        image:
+          type: object
+          properties:
+            content_type: { type: string, enum: [image/jpeg, image/png], default: image/jpeg }
+            width: { type: integer, minimum: 1, nullable: true }
+            height: { type: integer, minimum: 1, nullable: true }
+        pipeline:
+          type: object
+          properties:
+            paper_detect: { type: boolean, default: true }
+            quickdraw_judge: { type: boolean, default: true }
+        callbacks:
+          type: object
+          properties:
+            result_url: { type: string, format: uri, nullable: true }
+
+    CreateVisionStreamResponse:
+      type: object
+      required: [vision_stream_id, status]
+      properties:
+        vision_stream_id: { type: string, pattern: "^vis_[A-Za-z0-9_\\-]+$" }
+        status: { type: string, enum: [open] }
+
+    VisionFeedRequest:
+      type: object
+      required: [frames]
+      properties:
+        frames:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/VideoFrame" }
+
+    VideoFrame:
+      type: object
+      required: [ts_ms, bytes_base64]
+      properties:
+        ts_ms: { type: integer, minimum: 0 }
+        bytes_base64: { type: string }
+        content_type: { type: string, enum: [image/jpeg, image/png], default: image/jpeg }
+
+    VisionResultsResponse:
+      type: object
+      required: [vision_stream_id, results]
+      properties:
+        vision_stream_id: { type: string }
+        results:
+          type: array
+          items: { $ref: "#/components/schemas/VisionResult" }
+        next_after_seq: { type: integer, nullable: true }
+
+    VisionResult:
+      type: object
+      required: [seq, ts_ms, paper_detected]
+      properties:
+        seq: { type: integer, minimum: 0 }
+        ts_ms: { type: integer, minimum: 0 }
+        paper_detected: { type: boolean }
+        regions:
+          type: array
+          nullable: true
+          items: { $ref: "#/components/schemas/PaperRegion" }
+        match:
+          type: object
+          nullable: true
+          properties:
+            correct: { type: boolean }
+            confidence: { type: number, minimum: 0, maximum: 1 }
+            rationale: { type: string, nullable: true }
+        evidence: { $ref: "#/components/schemas/EvidenceRef" }
+
+    ImageRef:
+      type: object
+      properties:
+        content_type: { type: string, enum: [image/jpeg, image/png] }
+        url: { type: string, format: uri, nullable: true }
+        bytes_base64: { type: string, nullable: true }
+        width: { type: integer, minimum: 1, nullable: true }
+        height: { type: integer, minimum: 1, nullable: true }
+        frame_time_ms: { type: integer, minimum: 0, nullable: true }
+
+    BBox:
+      type: object
+      required: [x, y, w, h]
+      properties:
+        x: { type: number, minimum: 0, maximum: 1 }
+        y: { type: number, minimum: 0, maximum: 1 }
+        w: { type: number, minimum: 0, maximum: 1 }
+        h: { type: number, minimum: 0, maximum: 1 }
+
+    Point:
+      type: object
+      required: [x, y]
+      properties:
+        x: { type: number, minimum: 0, maximum: 1 }
+        y: { type: number, minimum: 0, maximum: 1 }
+
+    # ======================
+    # Internal: Decisions
+    # ======================
+    TriviaAnswerDecision:
+      type: object
+      required: [session_id, round_id, question_id, participant_identity, answer_time_ms, transcript, confidence]
+      properties:
+        session_id: { type: string }
+        round_id: { type: string }
+        question_id: { type: string }
+        participant_identity: { type: string }
+        is_correct: { type: boolean, nullable: true }
+        canonical_answer: { type: string, nullable: true }
+        answer_time_ms: { type: integer, minimum: 0 }
+        transcript: { type: string }
+        normalized_answer: { type: string, nullable: true }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        stt_vendor: { type: string, nullable: true }
+        raw: { type: object, additionalProperties: true }
+
+    QuickDrawCorrectDecision:
+      type: object
+      required: [session_id, round_id, participant_identity, frame_time_ms, correct, confidence]
+      properties:
+        session_id: { type: string }
+        round_id: { type: string }
+        participant_identity: { type: string }
+        frame_time_ms: { type: integer, minimum: 0 }
+        correct: { type: boolean, enum: [true] }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        evidence:
+          type: object
+          properties:
+            frame_id: { type: string, nullable: true }
+            url: { type: string, format: uri, nullable: true }
+        vision_vendor: { type: string, nullable: true }
+        raw: { type: object, additionalProperties: true }
+
+    # =====================================
+    # C) REALTIME EVENTS (typed envelopes)
+    # =====================================
+    TypedGameEventEnvelope:
+      type: object
+      required: [v, session_id, seq, ts_ms, type, payload]
+      properties:
+        v: { type: integer, enum: [1] }
+        session_id: { type: string }
+        seq: { type: integer, minimum: 0 }
+        ts_ms: { type: integer, minimum: 0 }
+        type: { $ref: "#/components/schemas/GameEventType" }
+        payload: { $ref: "#/components/schemas/GameEventPayload" }
+
+    # ── UPDATED v1.3.0: added 5 new event types ──
+    GameEventType:
+      type: string
+      enum:
+        - snapshot.full
+        - session.started
+        - session.paused
+        - session.resumed
+        - session.ended
+        - round.started
+        - round.ended
+        - score.updated
+        - moderator.speak.started
+        - moderator.speak.ended
+        - error.raised
+        - game.winner
+        - effect.triggered
+        - floor.changed
+        - participants.mute.changed
+        - quiet.achieved
+        - quiet.timeout
+        - trivia.question
+        - trivia.answer.detected
+        - trivia.winner
+        - quickdraw.prompt
+        - quickdraw.correct.detected
+        - quickdraw.winner
+
+    GameEventPayload:
+      oneOf:
+        - $ref: "#/components/schemas/EvSnapshotFull"
+        - $ref: "#/components/schemas/EvSessionStarted"
+        - $ref: "#/components/schemas/EvSessionPaused"
+        - $ref: "#/components/schemas/EvSessionResumed"
+        - $ref: "#/components/schemas/EvSessionEnded"
+        - $ref: "#/components/schemas/EvRoundStarted"
+        - $ref: "#/components/schemas/EvRoundEnded"
+        - $ref: "#/components/schemas/EvScoreUpdated"
+        - $ref: "#/components/schemas/EvModeratorSpeakStarted"
+        - $ref: "#/components/schemas/EvModeratorSpeakEnded"
+        - $ref: "#/components/schemas/EvErrorRaised"
+        - $ref: "#/components/schemas/EvGameWinner"
+        - $ref: "#/components/schemas/EvEffectTriggered"
+        - $ref: "#/components/schemas/EvFloorChanged"
+        - $ref: "#/components/schemas/EvParticipantsMuteChanged"
+        - $ref: "#/components/schemas/EvQuietAchieved"
+        - $ref: "#/components/schemas/EvQuietTimeout"
+        - $ref: "#/components/schemas/EvTriviaQuestion"
+        - $ref: "#/components/schemas/EvTriviaAnswerDetected"
+        - $ref: "#/components/schemas/EvTriviaWinner"
+        - $ref: "#/components/schemas/EvQuickDrawPrompt"
+        - $ref: "#/components/schemas/EvQuickDrawCorrectDetected"
+        - $ref: "#/components/schemas/EvQuickDrawWinner"
+
+    EvSnapshotFull:
+      type: object
+      required: [sequence, state]
+      properties:
+        sequence: { type: integer, minimum: 0 }
+        state:
+          oneOf:
+            - $ref: "#/components/schemas/TriviaSnapshotState"
+            - $ref: "#/components/schemas/QuickDrawSnapshotState"
+
+    EvSessionStarted:
+      type: object
+      required: [at_ms]
+      properties:
+        at_ms: { type: integer, minimum: 0 }
+
+    EvSessionPaused:
+      type: object
+      required: [at_ms]
+      properties:
+        at_ms: { type: integer, minimum: 0 }
+        reason: { type: string, nullable: true }
+
+    EvSessionResumed:
+      type: object
+      required: [at_ms]
+      properties:
+        at_ms: { type: integer, minimum: 0 }
+        reason: { type: string, nullable: true }
+
+    EvSessionEnded:
+      type: object
+      required: [at_ms]
+      properties:
+        at_ms: { type: integer, minimum: 0 }
+        reason: { type: string, nullable: true }
+        winner_identity: { type: string, nullable: true }
+        final_scores:
+          type: array
+          nullable: true
+          items: { $ref: "#/components/schemas/FinalScore" }
+
+    EvRoundStarted:
+      type: object
+      required: [round_id, ends_at_ms]
+      properties:
+        round_id: { type: string }
+        ends_at_ms: { type: integer, minimum: 0 }
+
+    EvRoundEnded:
+      type: object
+      required: [round_id]
+      properties:
+        round_id: { type: string }
+        winner_identity: { type: string, nullable: true }
+        tie: { type: boolean, default: false }
+
+    EvScoreUpdated:
+      type: object
+      required: [participant_identity, score, delta]
+      properties:
+        participant_identity: { type: string }
+        score: { type: integer }
+        delta: { type: integer }
+        reason: { type: string, nullable: true }
+
+    # ── REPLACED v1.3.0: EvModeratorSpoke → split into started/ended ──
+    EvModeratorSpeakStarted:
+      type: object
+      required: [speak_id, text, starts_at_ms, expected_end_ms, mode]
+      description: >
+        Emitted when the moderator begins speaking. Clients can use this to
+        duck/attenuate other audio, show "moderator is speaking" UI, etc.
+      properties:
+        speak_id:
+          type: string
+          pattern: "^spk_[A-Za-z0-9_\\-]+$"
+          description: Correlates with the matching speak.ended event.
+        text: { type: string }
+        language: { type: string, default: "en-US" }
+        starts_at_ms:
+          type: integer
+          minimum: 0
+          description: Absolute timestamp when audio playback begins.
+        expected_end_ms:
+          type: integer
+          minimum: 0
+          description: >
+            Estimated end timestamp based on TTS audio duration.
+            Actual end is signaled by moderator.speak.ended.
+        mode:
+          type: string
+          enum: [question, warning, reveal, announcement, freeform]
+          description: Semantic type of this utterance for client behavior.
+
+    EvModeratorSpeakEnded:
+      type: object
+      required: [speak_id, ended_at_ms]
+      description: >
+        Emitted when moderator speech playback completes. Clients restore
+        normal audio levels and can re-enable participant interaction.
+      properties:
+        speak_id:
+          type: string
+          pattern: "^spk_[A-Za-z0-9_\\-]+$"
+        ended_at_ms: { type: integer, minimum: 0 }
+
+    EvErrorRaised:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        detail: { type: object, additionalProperties: true, nullable: true }
+
+    EvGameWinner:
+      type: object
+      required: [winner_identity, final_scores, win_condition_met]
+      properties:
+        winner_identity: { type: string }
+        winner_display_name: { type: string, nullable: true }
+        final_scores:
+          type: array
+          items: { $ref: "#/components/schemas/FinalScore" }
+        win_condition_met:
+          type: string
+          enum: [first_to_points, admin_declared, all_questions_done]
+        total_questions: { type: integer, minimum: 0 }
+
+    FinalScore:
+      type: object
+      required: [participant_identity, score, rank]
+      properties:
+        participant_identity: { type: string }
+        display_name: { type: string, nullable: true }
+        score: { type: integer }
+        rank: { type: integer, minimum: 1 }
+        correct_answers: { type: integer, minimum: 0, nullable: true }
+        avg_answer_time_ms: { type: integer, minimum: 0, nullable: true }
+
+    EvEffectTriggered:
+      type: object
+      required: [effect]
+      properties:
+        effect: { type: string, enum: [confetti, spotlight, shake, flash, custom] }
+        target_identity: { type: string, nullable: true }
+        data: { type: object, additionalProperties: true }
+        duration_ms: { type: integer, minimum: 500, maximum: 30000, default: 5000 }
+
+    # ── NEW v1.3.0: floor.changed event ──
+    EvFloorChanged:
+      type: object
+      required: [floor, changed_by]
+      description: >
+        Emitted whenever floor control mode changes (set, released, or auto-expired).
+        Clients use this to show "moderator speaking" overlays, disable mic buttons, etc.
+      properties:
+        floor: { $ref: "#/components/schemas/FloorState" }
+        changed_by:
+          type: string
+          description: Identity of who changed the floor (moderator, admin, or "system" for auto-expire).
+        reason: { type: string, nullable: true }
+
+    # ── NEW v1.3.0: participants.mute.changed event ──
+    EvParticipantsMuteChanged:
+      type: object
+      required: [affected_identities, muted]
+      description: >
+        Emitted whenever participant mute state changes — from explicit mute/unmute
+        calls, floor control changes, or auto-unmute timer expiry. Clients use this
+        for mic icons, "you are muted" overlays, etc.
+      properties:
+        affected_identities:
+          type: array
+          items: { type: string }
+        muted: { type: boolean }
+        reason:
+          type: string
+          nullable: true
+          description: "Why: floor_control, admin_mute, auto_unmute, quiet_gate, etc."
+        source:
+          type: string
+          enum: [admin, floor_control, auto_unmute, quiet_gate, system]
+          description: What mechanism triggered the mute state change.
+        until_ms:
+          type: integer
+          minimum: 0
+          nullable: true
+          description: Absolute timestamp when auto-unmute will occur. Null = indefinite.
+
+    # ── NEW v1.3.0: quiet gate events ──
+    EvQuietAchieved:
+      type: object
+      required: [waited_ms]
+      description: >
+        Emitted when the quiet gate is satisfied — all participants have been
+        silent for the configured quiet_ms. Moderator can now safely deliver prompt.
+      properties:
+        waited_ms:
+          type: integer
+          minimum: 0
+          description: How long the engine waited before quiet was achieved.
+
+    EvQuietTimeout:
+      type: object
+      required: [waited_ms, offenders]
+      description: >
+        Emitted when max_wait_ms expires without achieving quiet. Contains
+        the list of participants still producing noise. The moderator can
+        then warn, force-mute, or proceed anyway.
+      properties:
+        waited_ms:
+          type: integer
+          minimum: 0
+          description: How long the engine waited (should equal max_wait_ms).
+        offenders:
+          type: array
+          items:
+            type: object
+            required: [participant_identity, level_db]
+            properties:
+              participant_identity: { type: string }
+              level_db:
+                type: number
+                description: Measured audio level (dBFS) of this participant.
+              display_name: { type: string, nullable: true }
+
+    EvTriviaQuestion:
+      type: object
+      required: [round_id, question_id, prompt, answer_window_ms]
+      properties:
+        round_id: { type: string }
+        question_id: { type: string }
+        topic: { type: string, nullable: true }
+        prompt: { type: string }
+        spoken: { type: boolean, default: true }
+        answer_window_ms: { type: integer, minimum: 500, maximum: 60000 }
+        unmute_at_ms: { type: integer, minimum: 0, nullable: true }
+
+    EvTriviaAnswerDetected:
+      type: object
+      required: [round_id, question_id, participant_identity, transcript, confidence, answer_time_ms]
+      properties:
+        round_id: { type: string }
+        question_id: { type: string }
+        participant_identity: { type: string }
+        transcript: { type: string }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        answer_time_ms: { type: integer, minimum: 0 }
+
+    EvTriviaWinner:
+      type: object
+      required: [round_id, question_id, winner_identity, answer, answer_time_ms, reason]
+      properties:
+        round_id: { type: string }
+        question_id: { type: string }
+        winner_identity: { type: string }
+        answer: { type: string }
+        answer_time_ms: { type: integer, minimum: 0 }
+        reason: { type: string, enum: [first_correct, host_override] }
+
+    EvQuickDrawPrompt:
+      type: object
+      required: [round_id, prompt, round_duration_ms]
+      properties:
+        round_id: { type: string }
+        prompt: { type: string }
+        category: { type: string, nullable: true }
+        spoken: { type: boolean, default: true }
+        round_duration_ms: { type: integer, minimum: 1000, maximum: 600000 }
+        unmute_at_ms: { type: integer, minimum: 0, nullable: true }
+
+    EvQuickDrawCorrectDetected:
+      type: object
+      required: [round_id, participant_identity, frame_time_ms, confidence]
+      properties:
+        round_id: { type: string }
+        participant_identity: { type: string }
+        frame_time_ms: { type: integer, minimum: 0 }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        evidence: { $ref: "#/components/schemas/EvidenceRef" }
+
+    EvQuickDrawWinner:
+      type: object
+      required: [round_id, winner_identity, win_time_ms, confidence, tie]
+      properties:
+        round_id: { type: string }
+        winner_identity: { type: string }
+        win_time_ms: { type: integer, minimum: 0 }
+        confidence: { type: number, minimum: 0, maximum: 1 }
+        tie: { type: boolean }
