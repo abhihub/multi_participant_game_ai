@@ -1,7 +1,6 @@
 import { FastifyInstance } from "fastify";
 import { ZodTypeProvider } from "fastify-type-provider-zod";
 import { TtsSpeakRequest, TtsSpeakResponse, TtsJob, JobIdParam } from "../schemas/index.js";
-import { generateJobId, generateSpeakId } from "../utils/ids.js";
 
 export default async function internalTtsRoutes(fastify: FastifyInstance) {
   const app = fastify.withTypeProvider<ZodTypeProvider>();
@@ -13,11 +12,27 @@ export default async function internalTtsRoutes(fastify: FastifyInstance) {
       response: { 200: TtsSpeakResponse },
     },
     preHandler: [fastify.verifyInternal],
-  }, async () => {
+  }, async (request) => {
+    const { session_id, text, speak_mode } = request.body;
+
+    // Verify session exists
+    fastify.sessionStore.getSession(session_id);
+
+    const job = fastify.ttsStore.createJob(session_id, text, speak_mode);
+
+    fastify.eventBus.emit(session_id, "moderator.speak.started", {
+      speak_id: job.speak_id,
+      text,
+      language: request.body.language,
+      starts_at_ms: Date.now(),
+      expected_end_ms: Date.now() + 3000,
+      mode: speak_mode,
+    });
+
     return {
-      job_id: generateJobId(),
-      speak_id: generateSpeakId(),
-      status: "queued" as const,
+      job_id: job.job_id,
+      speak_id: job.speak_id,
+      status: job.status,
     };
   });
 
@@ -29,16 +44,18 @@ export default async function internalTtsRoutes(fastify: FastifyInstance) {
     },
     preHandler: [fastify.verifyInternal],
   }, async (request) => {
+    const job = fastify.ttsStore.getJob(request.params.job_id);
+
     return {
-      job_id: request.params.job_id,
-      status: "done" as const,
+      job_id: job.job_id,
+      status: job.status,
       error: null,
-      audio: {
+      audio: job.status === "done" ? {
         content_type: "audio/pcm" as const,
         url: null,
         bytes_base64: null,
         duration_ms: 2500,
-      },
+      } : undefined,
     };
   });
 }

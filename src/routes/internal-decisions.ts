@@ -12,7 +12,8 @@ export default async function internalDecisionRoutes(fastify: FastifyInstance) {
       response: { 200: OkResponse },
     },
     preHandler: [fastify.verifyInternal],
-  }, async () => {
+  }, async (request) => {
+    fastify.sessionStore.ingestTriviaAnswer(request.body);
     return { ok: true as const };
   });
 
@@ -23,7 +24,8 @@ export default async function internalDecisionRoutes(fastify: FastifyInstance) {
       response: { 200: OkResponse },
     },
     preHandler: [fastify.verifyInternal],
-  }, async () => {
+  }, async (request) => {
+    fastify.sessionStore.ingestQuickDrawCorrect(request.body);
     return { ok: true as const };
   });
 }

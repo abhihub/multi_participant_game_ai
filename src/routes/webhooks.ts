@@ -14,10 +14,18 @@ export default async function webhookRoutes(fastify: FastifyInstance) {
     },
     preHandler: [fastify.verifyApiKey],
   }, async (request) => {
-    const { url, events } = request.body;
+    const { url, events, secret } = request.body;
+    const webhookId = generateWebhookId();
+
+    fastify.eventBus.addWebhook({
+      webhook_id: webhookId,
+      url,
+      events,
+      secret: secret ?? null,
+    });
 
     return {
-      webhook_id: generateWebhookId(),
+      webhook_id: webhookId,
       url,
       events,
     };

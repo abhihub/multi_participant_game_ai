@@ -6,7 +6,6 @@ import {
   SttFeedRequest, SttResultsResponse,
   StreamIdParam, AfterSeqQuery,
 } from "../schemas/index.js";
-import { generateSttStreamId } from "../utils/ids.js";
 
 export default async function internalSttRoutes(fastify: FastifyInstance) {
   const app = fastify.withTypeProvider<ZodTypeProvider>();
@@ -18,9 +17,16 @@ export default async function internalSttRoutes(fastify: FastifyInstance) {
       response: { 200: CreateSttStreamResponse },
     },
     preHandler: [fastify.verifyInternal],
-  }, async () => {
+  }, async (request) => {
+    const stream = fastify.streamStore.createSttStream({
+      session_id: request.body.session_id,
+      participant_identity: request.body.participant_identity,
+      round_id: request.body.round_id,
+      question_id: request.body.question_id,
+    });
+
     return {
-      stream_id: generateSttStreamId(),
+      stream_id: stream.stream_id,
       status: "open" as const,
     };
   });
@@ -33,7 +39,13 @@ export default async function internalSttRoutes(fastify: FastifyInstance) {
       response: { 200: OkResponse },
     },
     preHandler: [fastify.verifyInternal],
-  }, async () => {
+  }, async (request) => {
+    // Verify stream exists and is open
+    const stream = fastify.streamStore.getSttStream(request.params.stream_id);
+    if (stream.status === "closed") {
+      throw Object.assign(new Error("Stream is closed"), { statusCode: 409 });
+    }
+    // Acknowledge feed — actual STT processing is external
     return { ok: true as const };
   });
 
@@ -44,7 +56,8 @@ export default async function internalSttRoutes(fastify: FastifyInstance) {
       response: { 200: OkResponse },
     },
     preHandler: [fastify.verifyInternal],
-  }, async () => {
+  }, async (request) => {
+    fastify.streamStore.closeSttStream(request.params.stream_id);
     return { ok: true as const };
   });
 
@@ -57,10 +70,11 @@ export default async function internalSttRoutes(fastify: FastifyInstance) {
     },
     preHandler: [fastify.verifyInternal],
   }, async (request) => {
-    return {
-      stream_id: request.params.stream_id,
-      results: [],
-      next_after_seq: null,
-    };
+    const { after_seq, limit } = request.query;
+    return fastify.streamStore.getSttResults(
+      request.params.stream_id,
+      after_seq,
+      limit,
+    );
   });
 }

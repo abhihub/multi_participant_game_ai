@@ -8,6 +8,11 @@ import fastifySensible from "@fastify/sensible";
 import authPlugin from "./plugins/auth.js";
 import errorHandlerPlugin from "./plugins/error-handler.js";
 
+import { sessionStore } from "./state/SessionStore.js";
+import { eventBus } from "./state/EventBus.js";
+import { ttsStore } from "./state/TtsStore.js";
+import { streamStore } from "./state/StreamStore.js";
+
 import sessionRoutes from "./routes/sessions.js";
 import adminRoutes from "./routes/admin.js";
 import floorRoutes from "./routes/floor.js";
@@ -28,6 +33,12 @@ export async function buildApp() {
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);
 
+  // Decorate with state stores
+  app.decorate("sessionStore", sessionStore);
+  app.decorate("eventBus", eventBus);
+  app.decorate("ttsStore", ttsStore);
+  app.decorate("streamStore", streamStore);
+
   // Plugins
   await app.register(fastifySensible);
   await app.register(errorHandlerPlugin);
@@ -47,4 +58,14 @@ export async function buildApp() {
   await app.register(internalDecisionRoutes);
 
   return app;
+}
+
+// Augment Fastify types
+declare module "fastify" {
+  interface FastifyInstance {
+    sessionStore: typeof sessionStore;
+    eventBus: typeof eventBus;
+    ttsStore: typeof ttsStore;
+    streamStore: typeof streamStore;
+  }
 }

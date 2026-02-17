@@ -63,16 +63,87 @@ The platform has three API layers:
 
 ## Quick Start
 
+### Prerequisites
+
+- **Node.js** >= 20
+- **Python** >= 3.11
+- **uv** — Python package manager ([install](https://docs.astral.sh/uv/getting-started/installation/))
+- Accounts with: **LiveKit Cloud**, **OpenAI**, **Deepgram**, **Cartesia**
+
+### API Keys
+
+You need credentials from four services plus two self-chosen secrets:
+
+| Key | Used By | Where to Get It |
+|-----|---------|-----------------|
+| `LIVEKIT_API_KEY` | Both services | [LiveKit Cloud](https://cloud.livekit.io) — project settings |
+| `LIVEKIT_API_SECRET` | Both services | [LiveKit Cloud](https://cloud.livekit.io) — project settings |
+| `LIVEKIT_URL` | Both services | [LiveKit Cloud](https://cloud.livekit.io) — `wss://your-project.livekit.cloud` |
+| `OPENAI_API_KEY` | Moderator | [OpenAI Platform](https://platform.openai.com/api-keys) — powers question generation + answer judging |
+| `DEEPGRAM_API_KEY` | Moderator | [Deepgram Console](https://console.deepgram.com) — speech-to-text (Nova-3) |
+| `CARTESIA_API_KEY` | Moderator | [Cartesia](https://cartesia.ai) — text-to-speech (Sonic) |
+| `API_KEY` | Game Engine | You choose — authenticates public API clients |
+| `INTERNAL_AUTH_TOKEN` | Game Engine | You choose — must match `GAME_API_INTERNAL_TOKEN` in the moderator |
+
+### Environment Setup
+
+**1. Game Engine** — copy the example and fill in your values:
+
 ```bash
-# Install dependencies
-npm install
-
-# Development (hot reload)
-npm run dev
-
-# Production build
-npm run build && npm start
+cp .env.example .env
 ```
+
+Edit `.env`:
+
+```bash
+PORT=3000
+HOST=0.0.0.0
+LIVEKIT_API_KEY=<your-livekit-api-key>
+LIVEKIT_API_SECRET=<your-livekit-api-secret>
+LIVEKIT_URL=wss://<your-project>.livekit.cloud
+API_KEY=<choose-a-secret-for-public-api>
+INTERNAL_AUTH_TOKEN=<choose-a-shared-internal-secret>
+LOG_LEVEL=info
+```
+
+**2. Moderator** — edit the existing placeholder file:
+
+```bash
+# moderator/.env.local
+LIVEKIT_API_KEY=<same-key-as-above>
+LIVEKIT_API_SECRET=<same-secret-as-above>
+LIVEKIT_URL=wss://<same-project>.livekit.cloud
+GAME_API_URL=http://localhost:3000
+GAME_API_INTERNAL_TOKEN=<same-shared-internal-secret>
+OPENAI_API_KEY=sk-...
+DEEPGRAM_API_KEY=<your-deepgram-key>
+CARTESIA_API_KEY=<your-cartesia-key>
+```
+
+> **Important:** `INTERNAL_AUTH_TOKEN` (Game Engine) and `GAME_API_INTERNAL_TOKEN` (Moderator) must be the same value — this is how the moderator authenticates its API calls to the Game Engine.
+
+### Running Both Services
+
+Both services need to be running simultaneously. Start each in its own terminal:
+
+**Terminal 1 — Game Engine API:**
+
+```bash
+npm install
+npm run dev          # development with hot reload
+# or: npm run build && npm start   # production
+```
+
+**Terminal 2 — AI Moderator:**
+
+```bash
+cd moderator
+uv sync              # install Python dependencies
+uv run agent.py dev  # development with auto-reload
+# or: uv run agent.py start   # production
+```
+
+The Game Engine serves on `http://localhost:3000`. The moderator connects to LiveKit Cloud and communicates with the Game Engine via its internal API.
 
 ### Create a game session flow
 
@@ -120,6 +191,18 @@ Three auth schemes are used depending on the endpoint:
 | `InternalAuth` | `Authorization: Bearer <INTERNAL_TOKEN>` | Internal moderator adapter APIs |
 
 The `session_admin_token` is returned in the `CreateSession` response. Internal tokens are configured at the infrastructure level.
+
+### Roles
+
+| Role | Description | Typical Use |
+|------|-------------|-------------|
+| `host` | The player who created the room and runs the game. Has player privileges plus the ability to configure game settings (e.g., trivia topic, Quick Draw category). | The person who starts the call and invites others |
+| `admin` | Non-playing operator with full session control. Can start/pause/end sessions, override scores, and manage participants. Uses the `session_admin_token`. | A backend service or dashboard operator managing sessions |
+| `player` | A regular game participant. Can answer questions (trivia) or hold up drawings (Quick Draw). Has no admin privileges. | Anyone joining to play the game |
+| `spectator` | A view-only participant. Receives all realtime events but cannot interact with the game. | Audience members watching a live game |
+| `moderator` | The AI bot that joins the LiveKit room as a participant. Speaks via TTS, listens via STT, watches via Vision, and controls game flow. Assigned automatically on `attach`. | The Voice AI Bot — never assigned manually |
+
+> **`host` vs `admin`**: A `host` is a player who also has configuration privileges — they participate in the game while managing it. An `admin` is a non-playing operator who controls the session externally (e.g., from a dashboard). In many setups, the same person may hold both roles, but they serve different purposes: `host` = in-game authority, `admin` = system-level authority.
 
 ---
 

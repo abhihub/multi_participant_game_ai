@@ -27,10 +27,6 @@ const AttachModeratorResponse = z.object({
   joined_at_ms: z.number().int().min(0),
 });
 
-const AdvanceRoundRequest = z.object({
-  delay_ms: z.number().int().min(0).max(30000).default(0),
-}).optional();
-
 export default async function internalControlRoutes(fastify: FastifyInstance) {
   const app = fastify.withTypeProvider<ZodTypeProvider>();
 
@@ -55,11 +51,26 @@ export default async function internalControlRoutes(fastify: FastifyInstance) {
       response: { 200: AttachModeratorResponse },
     },
     preHandler: [fastify.verifyInternal],
-  }, async () => {
+  }, async (request) => {
+    const { session_id } = request.params;
+    const session = fastify.sessionStore.getSession(session_id);
+
+    const moderatorIdentity = "moderator-ai";
+    const now = Date.now();
+
+    // Add moderator as participant
+    await fastify.sessionStore.addParticipant(session_id, {
+      identity: moderatorIdentity,
+      display_name: "AI Moderator",
+      role: "moderator",
+    });
+
+    session.moderator_identity = moderatorIdentity;
+
     return {
       ok: true as const,
-      moderator_identity: "moderator-ai",
-      joined_at_ms: Date.now(),
+      moderator_identity: moderatorIdentity,
+      joined_at_ms: now,
     };
   });
 
@@ -71,7 +82,15 @@ export default async function internalControlRoutes(fastify: FastifyInstance) {
       response: { 200: OkResponse },
     },
     preHandler: [fastify.verifyInternal],
-  }, async () => {
+  }, async (request) => {
+    const { session_id } = request.params;
+    const session = fastify.sessionStore.getSession(session_id);
+
+    if (session.moderator_identity) {
+      session.participants.delete(session.moderator_identity);
+      session.moderator_identity = null;
+    }
+
     return { ok: true as const };
   });
 
@@ -85,11 +104,14 @@ export default async function internalControlRoutes(fastify: FastifyInstance) {
       response: { 200: AdvanceRoundResponse },
     },
     preHandler: [fastify.verifyInternal],
-  }, async () => {
+  }, async (request) => {
+    const { session_id } = request.params;
+    const result = fastify.sessionStore.advanceRound(session_id);
+
     return {
       ok: true as const,
-      action: "advanced" as const,
-      round_index: 1,
+      action: result.action,
+      round_index: result.round_index,
     };
   });
 }

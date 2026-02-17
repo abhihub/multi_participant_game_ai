@@ -7,7 +7,6 @@ import {
   SessionIdParam,
 } from "../schemas/index.js";
 import { AfterSeqQuery } from "../schemas/stt.js";
-import { generateSessionId, generateRoundId } from "../utils/ids.js";
 
 export default async function sessionRoutes(fastify: FastifyInstance) {
   const app = fastify.withTypeProvider<ZodTypeProvider>();
@@ -20,22 +19,17 @@ export default async function sessionRoutes(fastify: FastifyInstance) {
     },
     preHandler: [fastify.verifyApiKey],
   }, async (request) => {
-    const { game, livekit } = request.body;
-    const sessionId = generateSessionId();
+    const session = await fastify.sessionStore.createSession(request.body);
 
     return {
-      session_id: sessionId,
-      game,
-      status: "created" as const,
+      session_id: session.id,
+      game: session.game,
+      status: session.status,
       livekit: {
-        room_name: livekit.room_name,
-        room_region: livekit.room_region ?? null,
+        room_name: session.livekit.room_name,
+        room_region: session.livekit.room_region ?? null,
       },
-      tokens: {
-        host_token: `tok_host_${sessionId}`,
-        moderator_token: `tok_mod_${sessionId}`,
-        session_admin_token: `tok_admin_${sessionId}`,
-      },
+      tokens: session.tokens,
       realtime: {
         transport: "livekit_datachannel" as const,
         topic: "game.events.v1" as const,
@@ -43,7 +37,7 @@ export default async function sessionRoutes(fastify: FastifyInstance) {
     };
   });
 
-  // POST /v1/sessions/:session_id/token (maps to OpenAPI participants:token)
+  // POST /v1/sessions/:session_id/token
   app.post("/v1/sessions/:session_id/token", {
     schema: {
       params: SessionIdParam,
@@ -55,16 +49,23 @@ export default async function sessionRoutes(fastify: FastifyInstance) {
     const { session_id } = request.params;
     const { identity, display_name, role, metadata } = request.body;
 
+    const result = await fastify.sessionStore.addParticipant(session_id, {
+      identity,
+      display_name,
+      role,
+      metadata,
+    });
+
     return {
-      livekit_token: `lk_tok_${session_id}_${identity}`,
+      livekit_token: result.livekit_token,
       participant: {
-        identity,
-        display_name,
-        role,
-        score: 0,
-        muted: false,
-        joined_at_ms: Date.now(),
-        metadata,
+        identity: result.participant.identity,
+        display_name: result.participant.display_name,
+        role: result.participant.role,
+        score: result.participant.score,
+        muted: result.participant.muted,
+        joined_at_ms: result.participant.joined_at_ms,
+        metadata: result.participant.metadata,
       },
     };
   });
@@ -77,26 +78,57 @@ export default async function sessionRoutes(fastify: FastifyInstance) {
     },
   }, async (request) => {
     const { session_id } = request.params;
-    const roundId = generateRoundId();
+    const session = fastify.sessionStore.getSession(session_id);
+    const sequence = fastify.eventBus.getSequence(session_id);
+    const participants = [...session.participants.values()].map((p) => ({
+      identity: p.identity,
+      display_name: p.display_name,
+      role: p.role,
+      score: p.score,
+      muted: p.muted,
+    }));
 
-    return {
+    const round = session.round ?? {
+      round_id: "rnd_pending",
+      phase: "lobby",
+      ends_at_ms: Date.now() + 30000,
+    };
+
+    const base = {
       session_id,
-      game: "trivia" as const,
-      status: "running" as const,
-      sequence: 1,
-      floor: { mode: "open" as const },
-      state: {
-        participants: [
-          { identity: "player1", display_name: "Player 1", role: "player" as const, score: 0, muted: false },
-        ],
-        round: {
-          round_id: roundId,
-          phase: "lobby",
-          ends_at_ms: Date.now() + 30000,
+      game: session.game,
+      status: session.status,
+      sequence,
+      floor: session.floor,
+    };
+
+    if (session.game === "trivia") {
+      return {
+        ...base,
+        state: {
+          participants,
+          round,
+          trivia: {
+            topic: session.trivia?.topic ?? "General Knowledge",
+            difficulty: session.trivia?.difficulty,
+            question_index: session.trivia?.question_index ?? 0,
+          },
         },
-        trivia: {
-          topic: "General Knowledge",
-          question_index: 0,
+      };
+    }
+
+    // quick_draw
+    return {
+      ...base,
+      state: {
+        participants,
+        round,
+        quickdraw: {
+          prompt: session.quickdraw?.current_prompt ?? "Draw something",
+          category: session.quickdraw?.category ?? null,
+          difficulty: session.quickdraw?.difficulty,
+          prompt_index: session.quickdraw?.prompt_index ?? 0,
+          round_duration_ms: session.quickdraw?.round_duration_ms ?? 25000,
         },
       },
     };
@@ -111,11 +143,16 @@ export default async function sessionRoutes(fastify: FastifyInstance) {
     },
   }, async (request) => {
     const { session_id } = request.params;
+    // Verify session exists
+    fastify.sessionStore.getSession(session_id);
+
+    const { after_seq, limit } = request.query;
+    const result = fastify.eventBus.getEvents(session_id, after_seq, limit);
 
     return {
       session_id,
-      events: [],
-      next_after_seq: null,
+      events: result.events,
+      next_after_seq: result.next_after_seq,
     };
   });
 }

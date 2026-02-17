@@ -1,0 +1,11 @@
+To confirm the abilities of this AI Game moderator API, lets verify some requirements:
+1. It should be able to plug into an existing LiveKit room as a new "participant".
+2. Its job on the call is to be a game moderator
+3. It uses Voice AI to moderate the game. Think of it as a Voice AI Bot that joins the         
+  video call room to organize/moderate the game among rest of the participants.
+4. Example games: Trivia, QuickDraw
+
+Example of Trivia Game: - Trivia game:
+On the video conference call, there are 4 participants. One player (player A) is the admin of the call. Player A initiates the Trivia game. A fifthparticipant (the AI moderator joins the game). Admin Player A tells the Moderator AI to provide trivia on Roman history. Moderator starts the game. All players videos are updates with an overlay of their scores. Moderator mutes everyone and asks the first trivia question to all other 4 participants (except itself). As soon as the question is done speaking, all participants are unmuted by the moderator. Now moderator listens to each participant. The participant on the call who answers the question correctly first wins the point. The moderator awards the point and then moves on to the next participant. After one of the participants reaches 5 points, they win the game and the moderator ends the game. A confetti animation is played on the moderators video to show who won the game.
+
+Example of Quick Draw Game: QuickDraw game:  On the video conference call, there are 4 participants. One player (player A) is the admin of the call. Player A initiates the QuickDraw game. A fifth participant (the AI moderator joins the game). Moderator AI starts the game. All playersvideos are updates with an overlay of their scores. Moderator mutes everyone and asks to draw a airplane to all other 4 participants (except itself). As soon as the question is done speaking, all participants are unmuted by the moderator. Now moderator watches the video of each participant. The participant on the call who draws the airplane correctly on paper and shows to the camera first wins the point. The moderator awards the point and then moves on to the next drawing question. After one of the participants reaches 5 points, they win the game and the moderator ends the game. A confetti animation is played on the moderators video to show who won the game. 

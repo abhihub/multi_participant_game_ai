@@ -13,7 +13,9 @@ export default async function quickdrawRoutes(fastify: FastifyInstance) {
       response: { 200: OkResponse },
     },
     preHandler: [fastify.verifySessionAdmin],
-  }, async () => {
+  }, async (request) => {
+    const { session_id } = request.params;
+    fastify.sessionStore.setQuickDrawConfig(session_id, request.body);
     return { ok: true as const };
   });
 }

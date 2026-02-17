@@ -1,6 +1,7 @@
 import { FastifyInstance, FastifyRequest } from "fastify";
 import fp from "fastify-plugin";
 import { config } from "../config.js";
+import { sessionStore } from "../state/SessionStore.js";
 
 async function authPlugin(fastify: FastifyInstance) {
   fastify.decorate("verifyApiKey", async (request: FastifyRequest) => {
@@ -19,7 +20,13 @@ async function authPlugin(fastify: FastifyInstance) {
     if (!auth?.startsWith("Bearer ")) {
       throw fastify.httpErrors.unauthorized("Missing or invalid Authorization header");
     }
-    // In a real implementation, validate session admin token against session store
+    const token = auth.slice(7);
+    const session = sessionStore.findSessionByAdminToken(token);
+    if (!session) {
+      throw fastify.httpErrors.unauthorized("Invalid session admin token");
+    }
+    // Attach session_id to request for downstream handlers
+    (request as any).sessionAdminId = session.id;
   });
 
   fastify.decorate("verifyInternal", async (request: FastifyRequest) => {

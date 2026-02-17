@@ -9,12 +9,11 @@ import {
   VisionStreamIdParam,
 } from "../schemas/index.js";
 import { AfterSeqQuery } from "../schemas/stt.js";
-import { generateVisionStreamId } from "../utils/ids.js";
 
 export default async function internalVisionRoutes(fastify: FastifyInstance) {
   const app = fastify.withTypeProvider<ZodTypeProvider>();
 
-  // POST /internal/v1/vision/paper-detect
+  // POST /internal/v1/vision/paper-detect — lightweight one-shot (external service)
   app.post("/internal/v1/vision/paper-detect", {
     schema: {
       body: VisionPaperDetectRequest,
@@ -38,7 +37,7 @@ export default async function internalVisionRoutes(fastify: FastifyInstance) {
     };
   });
 
-  // POST /internal/v1/vision/quickdraw-judge
+  // POST /internal/v1/vision/quickdraw-judge — lightweight one-shot (external service)
   app.post("/internal/v1/vision/quickdraw-judge", {
     schema: {
       body: VisionQuickDrawJudgeRequest,
@@ -60,9 +59,15 @@ export default async function internalVisionRoutes(fastify: FastifyInstance) {
       response: { 200: CreateVisionStreamResponse },
     },
     preHandler: [fastify.verifyInternal],
-  }, async () => {
+  }, async (request) => {
+    const stream = fastify.streamStore.createVisionStream({
+      session_id: request.body.session_id,
+      participant_identity: request.body.participant_identity,
+      prompt: request.body.prompt,
+    });
+
     return {
-      vision_stream_id: generateVisionStreamId(),
+      vision_stream_id: stream.vision_stream_id,
       status: "open" as const,
     };
   });
@@ -75,7 +80,11 @@ export default async function internalVisionRoutes(fastify: FastifyInstance) {
       response: { 200: OkResponse },
     },
     preHandler: [fastify.verifyInternal],
-  }, async () => {
+  }, async (request) => {
+    const stream = fastify.streamStore.getVisionStream(request.params.vision_stream_id);
+    if (stream.status === "closed") {
+      throw Object.assign(new Error("Stream is closed"), { statusCode: 409 });
+    }
     return { ok: true as const };
   });
 
@@ -88,11 +97,12 @@ export default async function internalVisionRoutes(fastify: FastifyInstance) {
     },
     preHandler: [fastify.verifyInternal],
   }, async (request) => {
-    return {
-      vision_stream_id: request.params.vision_stream_id,
-      results: [],
-      next_after_seq: null,
-    };
+    const { after_seq, limit } = request.query;
+    return fastify.streamStore.getVisionResults(
+      request.params.vision_stream_id,
+      after_seq,
+      limit,
+    );
   });
 
   // POST /internal/v1/vision/streams/:vision_stream_id/close
@@ -102,7 +112,8 @@ export default async function internalVisionRoutes(fastify: FastifyInstance) {
       response: { 200: OkResponse },
     },
     preHandler: [fastify.verifyInternal],
-  }, async () => {
+  }, async (request) => {
+    fastify.streamStore.closeVisionStream(request.params.vision_stream_id);
     return { ok: true as const };
   });
 }

@@ -1,5 +1,35 @@
 # Manual Testing Guide
 
+## Setup
+
+Before testing, complete the environment setup in the [README Quick Start](README.md#quick-start) — you need API keys configured in `.env` and `moderator/.env.local`.
+
+For the **curl-based API tests** below, only the Game Engine needs to be running (`npm run dev`). The moderator is not required for API endpoint testing.
+
+For **full game flow testing** (moderator joins room, generates questions, judges answers), both services must be running — see [Running Both Services](README.md#running-both-services).
+
+## Automated Test Suite
+
+The moderator service has a three-layer automated test suite:
+
+```bash
+cd moderator
+
+# Unit tests — no credentials needed, fast (<1s)
+uv run pytest tests/unit -v
+
+# Behavioral tests — needs real OPENAI_API_KEY (auto-skips if missing)
+uv run pytest tests/behavioral -v --timeout=30
+
+# E2E tests — needs all services + credentials (auto-skips if unavailable)
+uv run pytest tests/e2e -v --timeout=120
+
+# All layers at once
+uv run pytest tests/ -v --timeout=120
+```
+
+---
+
 ## Starting the Dev Server
 
 ```bash

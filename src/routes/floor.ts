@@ -17,16 +17,30 @@ export default async function floorRoutes(fastify: FastifyInstance) {
     },
     preHandler: [fastify.verifySessionAdmin],
   }, async (request) => {
-    const { mode, allowed_roles, allowed_identities, duration_ms } = request.body;
+    const { session_id } = request.params;
+    const { mode, allowed_roles, allowed_identities, duration_ms, reason } = request.body;
+
+    const floor = fastify.sessionStore.setFloor(session_id, {
+      mode,
+      allowed_roles,
+      allowed_identities,
+      duration_ms,
+    });
+
+    fastify.eventBus.emit(session_id, "floor.changed", {
+      floor,
+      changed_by: "admin",
+      reason: reason ?? null,
+    });
 
     return {
       ok: true as const,
       floor: {
-        mode,
-        allowed_roles: allowed_roles ?? null,
-        allowed_identities: allowed_identities ?? null,
-        held_by: "moderator",
-        expires_at_ms: duration_ms ? Date.now() + duration_ms : null,
+        mode: floor.mode,
+        allowed_roles: floor.allowed_roles ?? null,
+        allowed_identities: floor.allowed_identities ?? null,
+        held_by: floor.held_by ?? null,
+        expires_at_ms: floor.expires_at_ms ?? null,
       },
     };
   });
@@ -39,7 +53,16 @@ export default async function floorRoutes(fastify: FastifyInstance) {
       response: { 200: OkResponse },
     },
     preHandler: [fastify.verifySessionAdmin],
-  }, async () => {
+  }, async (request) => {
+    const { session_id } = request.params;
+    const floor = fastify.sessionStore.releaseFloor(session_id);
+
+    fastify.eventBus.emit(session_id, "floor.changed", {
+      floor,
+      changed_by: "admin",
+      reason: request.body.reason ?? null,
+    });
+
     return { ok: true as const };
   });
 }

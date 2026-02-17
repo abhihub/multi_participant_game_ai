@@ -13,7 +13,9 @@ export default async function triviaRoutes(fastify: FastifyInstance) {
       response: { 200: OkResponse },
     },
     preHandler: [fastify.verifySessionAdmin],
-  }, async () => {
+  }, async (request) => {
+    const { session_id } = request.params;
+    fastify.sessionStore.setTriviaConfig(session_id, request.body);
     return { ok: true as const };
   });
 }
