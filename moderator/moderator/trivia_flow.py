@@ -15,6 +15,7 @@ from .api_client import ApiClient
 from .config import config
 from .events import EventBroadcaster
 from .prompts import TRIVIA_QUESTION_GENERATOR, TRIVIA_ANSWER_JUDGE
+from .video_renderer import VideoRenderer
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,7 @@ class TriviaFlow:
         session_id: str,
         topic: str = "General Knowledge",
         difficulty: str = "medium",
+        renderer: VideoRenderer | None = None,
     ) -> None:
         self._session = session
         self._api = api
@@ -67,6 +69,7 @@ class TriviaFlow:
         self._session_id = session_id
         self._topic = topic
         self._difficulty = difficulty
+        self._renderer = renderer
         self._running = False
         self._current_question: TriviaQuestion | None = None
         self._pending_answers: list[PendingAnswer] = []
@@ -97,6 +100,24 @@ class TriviaFlow:
         if self._running:
             await self._say("That's all the questions! Thanks for playing!")
             self._running = False
+
+        # Update HUD with final scores and winner banner
+        if self._renderer:
+            try:
+                snapshot = await self._api.get_snapshot(self._session_id)
+                participants = snapshot.get("participants", [])
+                if participants:
+                    scores = [
+                        (p.get("displayName") or p.get("identity", "?"), p.get("score", 0))
+                        for p in participants
+                    ]
+                    self._renderer.update_scores(scores)
+                    top = max(participants, key=lambda p: p.get("score", 0))
+                    winner_name = top.get("displayName") or top.get("identity", "Unknown")
+                    self._renderer.show_winner(winner_name)
+                    self._renderer.trigger_confetti()
+            except Exception:
+                logger.warning("failed to fetch final snapshot for renderer", exc_info=True)
 
     def stop(self) -> None:
         """Signal the flow to stop after the current round."""
@@ -138,6 +159,8 @@ class TriviaFlow:
 
         # 3. Speak the question
         await self._say(f"Question {round_number}: {question.question}")
+        if self._renderer:
+            self._renderer.set_question(question.question)
 
         # 4. Broadcast trivia.question event
         await self._events.broadcast("trivia.question", {
@@ -179,6 +202,19 @@ class TriviaFlow:
             return
 
         winner = await self._judge_answers(question, answers, round_id)
+
+        # Update leaderboard on HUD after scoring
+        if self._renderer:
+            try:
+                snapshot = await self._api.get_snapshot(self._session_id)
+                participants = snapshot.get("participants", [])
+                scores = [
+                    (p.get("displayName") or p.get("identity", "?"), p.get("score", 0))
+                    for p in participants
+                ]
+                self._renderer.update_scores(scores)
+            except Exception:
+                logger.debug("failed to update scores on renderer", exc_info=True)
 
         # 9. Announce result
         if winner:
@@ -281,7 +317,13 @@ class TriviaFlow:
 
     async def _say(self, text: str) -> None:
         """Speak text via the agent session TTS."""
-        await self._session.say(text)
+        if self._renderer:
+            self._renderer.set_speaking(True)
+        try:
+            await self._session.say(text)
+        finally:
+            if self._renderer:
+                self._renderer.set_speaking(False)
 
     async def _llm_generate(self, prompt: str) -> str:
         """Generate text from the LLM via the agent session.

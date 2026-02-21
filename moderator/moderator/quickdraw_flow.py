@@ -16,6 +16,7 @@ from .api_client import ApiClient
 from .config import config
 from .events import EventBroadcaster
 from .prompts import QUICKDRAW_PROMPT_GENERATOR
+from .video_renderer import VideoRenderer
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ class QuickDrawFlow:
         session_id: str,
         category: str = "objects",
         difficulty: str = "medium",
+        renderer: VideoRenderer | None = None,
     ) -> None:
         self._session = session
         self._room = room
@@ -57,6 +59,7 @@ class QuickDrawFlow:
         self._session_id = session_id
         self._category = category
         self._difficulty = difficulty
+        self._renderer = renderer
         self._running = False
         self._round_winner: str | None = None
         self._prompt_counter = 0
@@ -86,6 +89,24 @@ class QuickDrawFlow:
             await self._say("That's the last round! Thanks for drawing with me!")
             self._running = False
 
+        # Update HUD with final scores and winner banner
+        if self._renderer:
+            try:
+                snapshot = await self._api.get_snapshot(self._session_id)
+                participants = snapshot.get("participants", [])
+                if participants:
+                    scores = [
+                        (p.get("displayName") or p.get("identity", "?"), p.get("score", 0))
+                        for p in participants
+                    ]
+                    self._renderer.update_scores(scores)
+                    top = max(participants, key=lambda p: p.get("score", 0))
+                    winner_name = top.get("displayName") or top.get("identity", "Unknown")
+                    self._renderer.show_winner(winner_name)
+                    self._renderer.trigger_confetti()
+            except Exception:
+                logger.warning("failed to fetch final snapshot for renderer", exc_info=True)
+
     def stop(self) -> None:
         self._running = False
 
@@ -100,6 +121,8 @@ class QuickDrawFlow:
 
         # 2. Speak the prompt
         await self._say(f"Round {round_number}! Draw... {prompt.prompt}!")
+        if self._renderer:
+            self._renderer.set_question(f"Draw: {prompt.prompt}")
 
         # 3. Broadcast event
         await self._events.broadcast("quickdraw.prompt", {
@@ -202,6 +225,19 @@ class QuickDrawFlow:
                         confidence=result["confidence"],
                     )
 
+                    # Update leaderboard on HUD
+                    if self._renderer:
+                        try:
+                            snapshot = await self._api.get_snapshot(self._session_id)
+                            participants = snapshot.get("participants", [])
+                            scores = [
+                                (p.get("displayName") or p.get("identity", "?"), p.get("score", 0))
+                                for p in participants
+                            ]
+                            self._renderer.update_scores(scores)
+                        except Exception:
+                            logger.debug("failed to update scores on renderer", exc_info=True)
+
         except asyncio.TimeoutError:
             pass
         except Exception:
@@ -231,7 +267,13 @@ class QuickDrawFlow:
     # -- helpers ---------------------------------------------------------- #
 
     async def _say(self, text: str) -> None:
-        await self._session.say(text)
+        if self._renderer:
+            self._renderer.set_speaking(True)
+        try:
+            await self._session.say(text)
+        finally:
+            if self._renderer:
+                self._renderer.set_speaking(False)
 
     async def _llm_generate(self, prompt: str) -> str:
         llm = self._session.llm

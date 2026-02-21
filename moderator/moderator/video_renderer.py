@@ -1,0 +1,302 @@
+"""Canvas-based video HUD published as a LiveKit LocalVideoTrack.
+
+The moderator renders scores, the current question, a speaking indicator,
+confetti particles, and a winner banner onto a 640×480 canvas at 15 fps and
+streams it as a real WebRTC video track that all participants can see.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import math
+import random
+from dataclasses import dataclass, field
+from typing import Any
+
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+from livekit import rtc
+
+logger = logging.getLogger(__name__)
+
+# Canvas dimensions
+WIDTH = 640
+HEIGHT = 480
+FPS = 15
+
+# Colour palette
+BG_TOP = (15, 15, 35)
+BG_BOTTOM = (25, 20, 50)
+HEADER_BG = (40, 30, 80)
+SCORE_ROW_EVEN = (35, 30, 65)
+SCORE_ROW_ODD = (28, 24, 52)
+SCORE_HIGHLIGHT = (80, 60, 160)
+TEXT_PRIMARY = (240, 235, 255)
+TEXT_SECONDARY = (180, 170, 210)
+TEXT_ACCENT = (255, 215, 80)
+SPEAKING_COLOR = (80, 200, 120)
+WINNER_BG = (60, 40, 120)
+WINNER_TEXT = (255, 215, 80)
+
+CONFETTI_COLORS = [
+    (255, 80, 80), (80, 200, 255), (255, 215, 80),
+    (80, 255, 140), (255, 120, 200), (160, 100, 255),
+    (255, 160, 60), (60, 220, 200),
+]
+
+
+@dataclass
+class _Particle:
+    x: float
+    y: float
+    vx: float
+    vy: float
+    color: tuple[int, int, int]
+    w: int
+    h: int
+    angle: float
+    rot: float  # rotation speed rad/frame
+
+
+class VideoRenderer:
+    """Renders the game HUD and streams it as a LiveKit video track."""
+
+    def __init__(self) -> None:
+        self._source = rtc.VideoSource(WIDTH, HEIGHT)
+        self._track = rtc.LocalVideoTrack.create_video_track("moderator-hud", self._source)
+
+        # Render state (written from game flows, read from render loop)
+        self._scores: list[tuple[str, int]] = []       # [(display_name, score), …] sorted desc
+        self._question: str = ""
+        self._speaking: bool = False
+        self._winner_name: str | None = None
+        self._particles: list[_Particle] = []
+        self._winner_alpha: float = 0.0               # fade-in 0→1
+
+        self._running = False
+        self._task: asyncio.Task[None] | None = None
+
+    # -- public API -------------------------------------------------------- #
+
+    @property
+    def track(self) -> rtc.LocalVideoTrack:
+        return self._track
+
+    async def start(self) -> None:
+        self._running = True
+        self._task = asyncio.create_task(self._render_loop())
+        logger.info("video renderer started (%dx%d @ %d fps)", WIDTH, HEIGHT, FPS)
+
+    async def stop(self) -> None:
+        self._running = False
+        if self._task and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+        logger.info("video renderer stopped")
+
+    def update_scores(self, scores: list[tuple[str, int]]) -> None:
+        """Update the leaderboard. scores = [(display_name, score), …]."""
+        self._scores = sorted(scores, key=lambda s: s[1], reverse=True)
+
+    def set_question(self, text: str) -> None:
+        self._question = text
+
+    def set_speaking(self, speaking: bool) -> None:
+        self._speaking = speaking
+
+    def trigger_confetti(self) -> None:
+        self._particles = [self._make_particle() for _ in range(120)]
+
+    def show_winner(self, display_name: str) -> None:
+        self._winner_name = display_name
+        self._winner_alpha = 0.0
+
+    # -- render loop ------------------------------------------------------- #
+
+    async def _render_loop(self) -> None:
+        interval = 1.0 / FPS
+        while self._running:
+            try:
+                frame = self._render_frame()
+                self._source.capture_frame(frame)
+            except Exception:
+                logger.debug("frame render error", exc_info=True)
+            await asyncio.sleep(interval)
+
+    def _render_frame(self) -> rtc.VideoFrame:
+        img = self._draw()
+        # PIL RGBA → raw bytes
+        data = bytes(img.tobytes())
+        return rtc.VideoFrame(
+            width=WIDTH,
+            height=HEIGHT,
+            type=rtc.VideoBufferType.RGBA,
+            data=data,
+        )
+
+    # -- drawing ----------------------------------------------------------- #
+
+    def _draw(self) -> Image.Image:
+        img = Image.new("RGBA", (WIDTH, HEIGHT))
+        draw = ImageDraw.Draw(img, "RGBA")
+
+        self._draw_background(draw)
+        self._draw_header(draw)
+        self._draw_leaderboard(draw)
+        self._draw_question_banner(draw, img)
+        self._draw_speaking_indicator(draw)
+        self._tick_and_draw_confetti(draw)
+        if self._winner_name:
+            self._draw_winner_banner(draw)
+
+        return img
+
+    def _draw_background(self, draw: ImageDraw.ImageDraw) -> None:
+        for y in range(HEIGHT):
+            t = y / HEIGHT
+            r = int(BG_TOP[0] + t * (BG_BOTTOM[0] - BG_TOP[0]))
+            g = int(BG_TOP[1] + t * (BG_BOTTOM[1] - BG_TOP[1]))
+            b = int(BG_TOP[2] + t * (BG_BOTTOM[2] - BG_TOP[2]))
+            draw.line([(0, y), (WIDTH, y)], fill=(r, g, b, 255))
+
+    def _draw_header(self, draw: ImageDraw.ImageDraw) -> None:
+        draw.rectangle([0, 0, WIDTH, 44], fill=(*HEADER_BG, 255))
+        font = _font(18)
+        draw.text((WIDTH // 2, 22), "🎮  AI Game Moderator", font=font,
+                  fill=(*TEXT_ACCENT, 255), anchor="mm")
+
+    def _draw_leaderboard(self, draw: ImageDraw.ImageDraw) -> None:
+        if not self._scores:
+            font = _font(14)
+            draw.text((WIDTH // 2, HEIGHT // 2), "Waiting for players…",
+                      font=font, fill=(*TEXT_SECONDARY, 200), anchor="mm")
+            return
+
+        top = 54
+        row_h = 38
+        pad_x = 24
+        font_name = _font(15)
+        font_score = _font(17)
+        medal = ["🥇", "🥈", "🥉"]
+
+        for i, (name, score) in enumerate(self._scores[:8]):
+            y0 = top + i * row_h
+            y1 = y0 + row_h - 2
+            bg = SCORE_HIGHLIGHT if i == 0 else (SCORE_ROW_EVEN if i % 2 == 0 else SCORE_ROW_ODD)
+            draw.rectangle([pad_x, y0, WIDTH - pad_x, y1], fill=(*bg, 255))
+
+            prefix = medal[i] if i < 3 else f"{i + 1}."
+            label = f"{prefix}  {name}"
+            draw.text((pad_x + 10, y0 + row_h // 2), label,
+                      font=font_name, fill=(*TEXT_PRIMARY, 255), anchor="lm")
+
+            score_text = str(score)
+            draw.text((WIDTH - pad_x - 10, y0 + row_h // 2), score_text,
+                      font=font_score, fill=(*TEXT_ACCENT, 255), anchor="rm")
+
+    def _draw_question_banner(self, draw: ImageDraw.ImageDraw, img: Image.Image) -> None:
+        if not self._question:
+            return
+        banner_h = 56
+        y0 = HEIGHT - banner_h
+        draw.rectangle([0, y0, WIDTH, HEIGHT], fill=(20, 15, 45, 230))
+        font = _font(13)
+        # Word-wrap to ~72 chars
+        words = self._question.split()
+        lines: list[str] = []
+        cur = ""
+        for w in words:
+            if len(cur) + len(w) + 1 > 72:
+                lines.append(cur.rstrip())
+                cur = w + " "
+            else:
+                cur += w + " "
+        if cur.strip():
+            lines.append(cur.rstrip())
+        lines = lines[:2]
+        total = len(lines) * 18
+        start_y = y0 + (banner_h - total) // 2 + 9
+        for line in lines:
+            draw.text((WIDTH // 2, start_y), line, font=font,
+                      fill=(*TEXT_PRIMARY, 255), anchor="mm")
+            start_y += 18
+
+    def _draw_speaking_indicator(self, draw: ImageDraw.ImageDraw) -> None:
+        if not self._speaking:
+            return
+        cx, cy, r = WIDTH - 22, 22, 8
+        draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(*SPEAKING_COLOR, 255))
+        font = _font(11)
+        draw.text((cx - r - 4, cy), "🎙", font=font, fill=(*TEXT_PRIMARY, 200), anchor="rm")
+
+    def _tick_and_draw_confetti(self, draw: ImageDraw.ImageDraw) -> None:
+        alive: list[_Particle] = []
+        for p in self._particles:
+            p.x += p.vx
+            p.vy += 0.18          # gravity
+            p.y += p.vy
+            p.angle += p.rot
+            if p.y < HEIGHT + 20:
+                alive.append(p)
+                # Draw as rotated rectangle approximation (4 corner points)
+                cx, cy = p.x, p.y
+                hw, hh = p.w / 2, p.h / 2
+                cos_a, sin_a = math.cos(p.angle), math.sin(p.angle)
+                corners = [
+                    (cx + cos_a * (-hw) - sin_a * (-hh),
+                     cy + sin_a * (-hw) + cos_a * (-hh)),
+                    (cx + cos_a * hw - sin_a * (-hh),
+                     cy + sin_a * hw + cos_a * (-hh)),
+                    (cx + cos_a * hw - sin_a * hh,
+                     cy + sin_a * hw + cos_a * hh),
+                    (cx + cos_a * (-hw) - sin_a * hh,
+                     cy + sin_a * (-hw) + cos_a * hh),
+                ]
+                draw.polygon(corners, fill=(*p.color, 210))
+        self._particles = alive
+
+    def _draw_winner_banner(self, draw: ImageDraw.ImageDraw) -> None:
+        self._winner_alpha = min(1.0, self._winner_alpha + 0.06)
+        alpha = int(self._winner_alpha * 220)
+        cy = HEIGHT // 2 - 20
+        draw.rectangle([60, cy - 44, WIDTH - 60, cy + 54], fill=(*WINNER_BG, alpha))
+        font_big = _font(26)
+        font_sm = _font(15)
+        draw.text((WIDTH // 2, cy - 18), "🏆  WINNER!", font=font_big,
+                  fill=(*WINNER_TEXT, alpha), anchor="mm")
+        draw.text((WIDTH // 2, cy + 26), self._winner_name or "", font=font_sm,
+                  fill=(*TEXT_PRIMARY, alpha), anchor="mm")
+
+    # -- helpers ----------------------------------------------------------- #
+
+    @staticmethod
+    def _make_particle() -> _Particle:
+        return _Particle(
+            x=random.uniform(0, WIDTH),
+            y=random.uniform(-20, 0),
+            vx=random.uniform(-1.5, 1.5),
+            vy=random.uniform(1.0, 4.0),
+            color=random.choice(CONFETTI_COLORS),
+            w=random.randint(6, 12),
+            h=random.randint(4, 8),
+            angle=random.uniform(0, math.tau),
+            rot=random.uniform(-0.15, 0.15),
+        )
+
+
+# Module-level font cache (Pillow default font, no file needed)
+_font_cache: dict[int, ImageFont.ImageFont] = {}
+
+
+def _font(size: int) -> ImageFont.ImageFont:
+    if size not in _font_cache:
+        try:
+            _font_cache[size] = ImageFont.load_default(size=size)
+        except TypeError:
+            # Pillow < 10 fallback
+            _font_cache[size] = ImageFont.load_default()
+    return _font_cache[size]

@@ -15,6 +15,7 @@ from .events import EventBroadcaster
 from .prompts import TRIVIA_MODERATOR, QUICKDRAW_MODERATOR
 from .trivia_flow import TriviaFlow
 from .quickdraw_flow import QuickDrawFlow
+from .video_renderer import VideoRenderer
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ class GameModerator(Agent):
         self._flow_task: asyncio.Task[None] | None = None
         self._trivia_flow: TriviaFlow | None = None
         self._quickdraw_flow: QuickDrawFlow | None = None
+        self._renderer: VideoRenderer | None = None
 
     # -- lifecycle -------------------------------------------------------- #
 
@@ -72,6 +74,18 @@ class GameModerator(Agent):
         # Set up event broadcaster
         self._events = EventBroadcaster(room, session_id)
 
+        # Create and publish the canvas video HUD track
+        self._renderer = VideoRenderer()
+        await self._renderer.start()
+        try:
+            await self._ctx.room.local_participant.publish_track(
+                self._renderer.track,
+                rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_CAMERA),
+            )
+            logger.info("video HUD track published")
+        except Exception:
+            logger.warning("failed to publish video HUD track", exc_info=True)
+
         # Get session snapshot to know game type + config
         try:
             snapshot = await self._api.get_snapshot(session_id)
@@ -90,6 +104,10 @@ class GameModerator(Agent):
 
     async def on_exit(self) -> None:
         """Called when the agent is leaving the room."""
+        # Stop video renderer first
+        if self._renderer:
+            await self._renderer.stop()
+
         # Stop any running flow
         if self._trivia_flow:
             self._trivia_flow.stop()
@@ -180,6 +198,7 @@ class GameModerator(Agent):
                     session_id=self._session_id,
                     category=category,
                     difficulty=difficulty,
+                    renderer=self._renderer,
                 )
                 await self._quickdraw_flow.run()
             else:
@@ -190,6 +209,7 @@ class GameModerator(Agent):
                     session_id=self._session_id,
                     topic=topic,
                     difficulty=difficulty,
+                    renderer=self._renderer,
                 )
                 await self._trivia_flow.run()
         except asyncio.CancelledError:

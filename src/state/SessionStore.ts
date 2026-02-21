@@ -480,6 +480,13 @@ class SessionStore {
           win_condition_met: "first_to_points",
         });
 
+        eventBus.emit(session.id, "effect.triggered", {
+          effect: "confetti",
+          target_identity: p.identity,
+          duration_ms: 8000,
+          data: {},
+        });
+
         this.transitionStatus(session.id, "ended");
 
         eventBus.emit(session.id, "session.ended", {
