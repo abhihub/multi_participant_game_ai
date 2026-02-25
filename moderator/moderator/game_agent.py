@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 from livekit import rtc
-from livekit.agents import Agent, AgentSession, RtcSession
+from livekit.agents import Agent, AgentSession, JobContext
 
 from .api_client import ApiClient
 from .config import config
@@ -31,7 +32,7 @@ class GameModerator(Agent):
     On disconnect it detaches from the API.
     """
 
-    def __init__(self, ctx: RtcSession) -> None:
+    def __init__(self, ctx: JobContext) -> None:
         super().__init__(instructions=TRIVIA_MODERATOR)
         self._ctx = ctx
         self._api = ApiClient()
@@ -133,36 +134,62 @@ class GameModerator(Agent):
 
     # -- STT callback ----------------------------------------------------- #
 
-    async def on_user_turn_completed(self, turn: Any) -> None:
-        """Called when STT finishes transcribing a player utterance.
+    async def on_user_turn_completed(self, chat_ctx: Any, *, new_message: Any = None, **kwargs: Any) -> None:
+        """Called when STT finishes transcribing a player utterance (livekit-agents 1.4.x).
 
         Routes the transcript to the active trivia flow for answer processing.
         """
         transcript = ""
         participant_identity = "unknown"
 
-        # Extract transcript text from the turn object
-        if hasattr(turn, "text"):
-            transcript = turn.text
-        elif hasattr(turn, "transcript"):
-            transcript = turn.transcript
-        elif isinstance(turn, str):
-            transcript = turn
-
-        # Try to get participant identity
-        if hasattr(turn, "participant") and turn.participant:
-            participant_identity = getattr(turn.participant, "identity", "unknown")
+        # livekit-agents 1.4.x: transcript is in new_message.text_content
+        if new_message is not None:
+            text = getattr(new_message, "text_content", None)
+            if callable(text):
+                text = text()
+            if isinstance(text, str):
+                transcript = text
+            elif text is None:
+                # Fallback: join string items from content list
+                content = getattr(new_message, "content", []) or []
+                transcript = " ".join(c for c in content if isinstance(c, str))
 
         if not transcript.strip():
             return
 
+        # Infer participant identity from the room's active speakers
+        # (livekit-agents 1.4.x does not pass participant identity in this callback)
+        try:
+            speakers = self._ctx.room.active_speakers
+            remote = [p for p in speakers if p.identity != self._ctx.room.local_participant.identity]
+            if remote:
+                participant_identity = remote[0].identity
+            elif speakers:
+                participant_identity = speakers[0].identity
+        except Exception:
+            pass
+
         logger.debug("user turn: %s said '%s'", participant_identity, transcript[:80])
 
-        # Route to trivia flow if active
+        # Route to active game flow
         if self._trivia_flow:
             self._trivia_flow.receive_answer(participant_identity, transcript)
 
     # -- game flow -------------------------------------------------------- #
+
+    async def _wait_for_running(self, timeout_s: float = 600.0, poll_interval_s: float = 2.0) -> str:
+        """Poll the snapshot API until session reaches 'running' (or ends/errors)."""
+        deadline = asyncio.get_event_loop().time() + timeout_s
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                snap = await self._api.get_snapshot(self._session_id)
+                status = snap.get("status", "created")
+                if status in ("running", "ended", "error"):
+                    return status
+            except Exception:
+                logger.debug("snapshot poll failed, retrying", exc_info=True)
+            await asyncio.sleep(poll_interval_s)
+        return "timeout"
 
     async def _run_game_flow(self, snapshot: dict[str, Any] | None = None) -> None:
         """Start and run the appropriate game flow."""
@@ -173,6 +200,31 @@ class GameModerator(Agent):
         if session is None:
             logger.error("no agent session available")
             return
+
+        # Wait for admin to click "Start Game" (session transitions to 'running')
+        current_status = (snapshot or {}).get("status", "created")
+        if current_status != "running":
+            logger.info(
+                "waiting for session %s to start (current status: %s)",
+                self._session_id, current_status,
+            )
+            current_status = await self._wait_for_running()
+            if current_status != "running":
+                logger.warning(
+                    "session %s never reached running (final: %s), aborting flow",
+                    self._session_id, current_status,
+                )
+                return
+
+        # Relay session.started to all room participants via DataChannel
+        await self._events.broadcast("session.started", {"at_ms": int(time.time() * 1000)})
+        logger.info("broadcast session.started for session %s", self._session_id)
+
+        # Re-fetch snapshot so config reflects any changes made before start
+        try:
+            snapshot = await self._api.get_snapshot(self._session_id)
+        except Exception:
+            logger.warning("failed to re-fetch snapshot after start, using original")
 
         # Extract config from snapshot
         topic = "General Knowledge"
@@ -222,23 +274,43 @@ class GameModerator(Agent):
     async def _resolve_session_id(self, room: rtc.Room) -> str:
         """Extract session_id from room metadata or derive from room name.
 
-        The Game Engine API creates rooms with names like ``sess_<id>`` or
-        stores the session_id in the room's metadata JSON.
+        The Game Engine API pre-creates the LiveKit room with metadata
+        ``{"session_id": "sess_xxx"}`` so the moderator can always find it.
         """
-        # Try room metadata first
+        import json
+
+        # Primary path: read from room metadata (set by Game Engine on room creation)
         if room.metadata:
             try:
-                import json
                 meta = json.loads(room.metadata)
                 if "session_id" in meta:
-                    return meta["session_id"]
-            except (ValueError, TypeError):
-                pass
+                    session_id = meta["session_id"]
+                    logger.info(
+                        "resolved session_id=%s from room metadata (room=%s)",
+                        session_id, room.name,
+                    )
+                    return session_id
+            except (ValueError, TypeError) as exc:
+                logger.warning(
+                    "room metadata present but unparseable (room=%s): %s",
+                    room.name, exc,
+                )
+        else:
+            logger.warning(
+                "room %s has no metadata — cannot resolve session_id from metadata",
+                room.name,
+            )
 
-        # Fall back to room name (which may be the session_id)
+        # Fallback: room name may itself be the session_id (older rooms)
         room_name = room.name or ""
         if room_name.startswith("sess_"):
+            logger.info("using room name as session_id: %s", room_name)
             return room_name
 
-        # Last resort: use room name as-is
+        # Last resort: room code used as session_id — will likely 400 on attach
+        logger.error(
+            "CANNOT resolve session_id: room=%s has no metadata and name is not a sess_ ID. "
+            "API attach will fail. Ensure Game Engine pre-creates the LiveKit room with metadata.",
+            room_name,
+        )
         return room_name

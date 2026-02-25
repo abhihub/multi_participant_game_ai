@@ -1,4 +1,4 @@
-import { AccessToken } from "livekit-server-sdk";
+import { AccessToken, RoomServiceClient } from "livekit-server-sdk";
 import { config } from "../config.js";
 import { generateSessionId, generateRoundId } from "../utils/ids.js";
 import { eventBus } from "./EventBus.js";
@@ -68,6 +68,26 @@ class SessionStore {
     };
 
     this.sessions.set(sessionId, session);
+
+    // Pre-create the LiveKit room with session_id in metadata so the
+    // moderator agent can resolve the correct session when it joins.
+    if (hasLiveKit) {
+      try {
+        const livekitHost = config.livekit.url
+          .replace(/^wss:\/\//, "https://")
+          .replace(/^ws:\/\//, "http://");
+        const svc = new RoomServiceClient(livekitHost, config.livekit.apiKey, config.livekit.apiSecret);
+        await svc.createRoom({
+          name: req.livekit.room_name,
+          metadata: JSON.stringify({ session_id: sessionId }),
+        });
+      } catch (err) {
+        // Non-fatal — room will be created lazily by LiveKit on first join,
+        // but the moderator will fall back to using the room name as session ID.
+        console.warn("Failed to pre-create LiveKit room with metadata:", err);
+      }
+    }
+
     return session;
   }
 

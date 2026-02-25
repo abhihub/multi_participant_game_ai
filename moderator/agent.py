@@ -14,8 +14,8 @@ from dotenv import load_dotenv
 # Load environment before importing agents (they read LIVEKIT_* vars at import)
 load_dotenv(".env.local")
 
-from livekit.agents import AgentSession, RtcSession, cli  # noqa: E402
-from livekit.plugins import silero  # noqa: E402
+from livekit.agents import AgentSession, JobContext, WorkerOptions, cli  # noqa: E402
+from livekit.plugins import cartesia, deepgram, openai, silero  # noqa: E402
 
 from moderator.game_agent import GameModerator  # noqa: E402
 
@@ -23,17 +23,18 @@ logger = logging.getLogger("moderator")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
 
-async def entrypoint(ctx: RtcSession) -> None:
+async def entrypoint(ctx: JobContext) -> None:
     """Called by the LiveKit Agents framework when a new session is dispatched."""
+    await ctx.connect()
     logger.info("new session: room=%s", ctx.room.name)
 
     session = AgentSession(
         # STT: Deepgram Nova-3 (multilingual)
-        stt="deepgram/nova-3",
+        stt=deepgram.STT(model="nova-3"),
         # LLM: OpenAI GPT-4.1-mini for question gen + judging
-        llm="openai/gpt-4.1-mini",
+        llm=openai.LLM(model="gpt-4.1-mini"),
         # TTS: Cartesia Sonic
-        tts="cartesia/sonic",
+        tts=cartesia.TTS(),
         # VAD: Silero for voice activity detection
         vad=silero.VAD.load(),
     )
@@ -43,4 +44,4 @@ async def entrypoint(ctx: RtcSession) -> None:
 
 
 if __name__ == "__main__":
-    cli.run_app(entrypoint)
+    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))

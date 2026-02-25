@@ -326,26 +326,26 @@ class TriviaFlow:
                 self._renderer.set_speaking(False)
 
     async def _llm_generate(self, prompt: str) -> str:
-        """Generate text from the LLM via the agent session.
+        """Generate text from the LLM via the agent session (livekit-agents 1.4.x).
 
-        Uses a simple chat completion with the prompt as a user message.
-        The LLM plugin is configured on the AgentSession.
+        Uses a single-turn ChatContext with the prompt as a user message.
         """
-        # Use the session's LLM to generate a response
         llm = self._session.llm
         if llm is None:
             logger.error("no LLM configured on agent session")
             return "{}"
 
+        from livekit.agents.llm import ChatContext
+        chat_ctx = ChatContext()
+        chat_ctx.add_message(role="user", content=prompt)
+
         response_parts: list[str] = []
-        async for chunk in llm.chat(
-            chat_ctx=[
-                {"role": "user", "content": prompt},
-            ],
-        ):
-            if hasattr(chunk, "text") and chunk.text:
-                response_parts.append(chunk.text)
-            elif hasattr(chunk, "delta") and chunk.delta:
-                response_parts.append(chunk.delta)
+        async for chunk in llm.chat(chat_ctx=chat_ctx):
+            # livekit-agents 1.4.x: ChatChunk.delta.content holds the text
+            delta = getattr(chunk, "delta", None)
+            if delta is not None:
+                text = getattr(delta, "content", None)
+                if text:
+                    response_parts.append(text)
 
         return "".join(response_parts)
