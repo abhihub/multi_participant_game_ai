@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from typing import Any
 
 from livekit import rtc
 from livekit.agents import Agent, AgentSession, JobContext
+from livekit.plugins import deepgram as _deepgram_plugin
 
 from .api_client import ApiClient
 from .config import config
@@ -43,6 +45,8 @@ class GameModerator(Agent):
         self._trivia_flow: TriviaFlow | None = None
         self._quickdraw_flow: QuickDrawFlow | None = None
         self._renderer: VideoRenderer | None = None
+        self._answer_stt = _deepgram_plugin.STT(model="nova-3")
+        self._stt_tasks: dict[str, asyncio.Task] = {}
 
     # -- lifecycle -------------------------------------------------------- #
 
@@ -51,6 +55,36 @@ class GameModerator(Agent):
         room = self._ctx.room
         room_name = room.name or "unknown"
         logger.info("moderator joined room: %s", room_name)
+
+        # Bug 3: bail out if another moderator instance is already active in this room
+        existing = [p for p in room.remote_participants.values() if p.identity == "moderator-ai"]
+        if existing:
+            logger.warning(
+                "moderator-ai already present in room %s — duplicate instance detected, exiting",
+                room_name,
+            )
+            return
+
+        # Per-participant STT: subscribe to audio tracks as they arrive
+        @room.on("track_subscribed")
+        def _on_track_subscribed(track, pub, participant) -> None:
+            if (track.kind == rtc.TrackKind.KIND_AUDIO
+                    and participant.identity != "moderator-ai"
+                    and participant.identity not in self._stt_tasks):
+                self._stt_tasks[participant.identity] = asyncio.create_task(
+                    self._run_participant_stt(participant.identity, track)
+                )
+
+        # Subscribe to tracks already present when we join
+        for p in room.remote_participants.values():
+            for pub in p.track_publications.values():
+                if (pub.track
+                        and pub.kind == rtc.TrackKind.KIND_AUDIO
+                        and p.identity != "moderator-ai"
+                        and p.identity not in self._stt_tasks):
+                    self._stt_tasks[p.identity] = asyncio.create_task(
+                        self._run_participant_stt(p.identity, pub.track)
+                    )
 
         # Determine session_id from room metadata or room name
         session_id = await self._resolve_session_id(room)
@@ -109,6 +143,14 @@ class GameModerator(Agent):
         if self._renderer:
             await self._renderer.stop()
 
+        # Cancel per-participant STT tasks
+        for task in self._stt_tasks.values():
+            task.cancel()
+        for task in self._stt_tasks.values():
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        self._stt_tasks.clear()
+
         # Stop any running flow
         if self._trivia_flow:
             self._trivia_flow.stop()
@@ -157,23 +199,40 @@ class GameModerator(Agent):
         if not transcript.strip():
             return
 
-        # Infer participant identity from the room's active speakers
-        # (livekit-agents 1.4.x does not pass participant identity in this callback)
+        # Routing is handled by per-participant STT streams in _run_participant_stt.
+        # Log here for debugging the AgentSession pipeline only.
+        logger.debug("session STT (not routed): '%s'", transcript[:80])
+
+    # -- per-participant STT ---------------------------------------------- #
+
+    async def _run_participant_stt(self, identity: str, track) -> None:
+        """Stream one participant's audio through Deepgram, route finals to trivia flow."""
+        from livekit.agents import stt as _stt_types
+        logger.info("starting STT stream for participant: %s", identity)
+        stt_stream = self._answer_stt.stream()
+        audio_stream = rtc.AudioStream(track, sample_rate=16000, num_channels=1)
+
+        async def _feed() -> None:
+            async for ev in audio_stream:
+                stt_stream.push_frame(ev.frame)
+            await stt_stream.aclose()
+
+        feed_task = asyncio.create_task(_feed())
         try:
-            speakers = self._ctx.room.active_speakers
-            remote = [p for p in speakers if p.identity != self._ctx.room.local_participant.identity]
-            if remote:
-                participant_identity = remote[0].identity
-            elif speakers:
-                participant_identity = speakers[0].identity
+            async for ev in stt_stream:
+                if ev.type == _stt_types.SpeechEventType.FINAL_TRANSCRIPT:
+                    text = ev.alternatives[0].text if ev.alternatives else ""
+                    if text.strip() and self._trivia_flow:
+                        logger.debug("participant STT: %s said '%s'", identity, text[:80])
+                        self._trivia_flow.receive_answer(identity, text)
+        except asyncio.CancelledError:
+            raise
         except Exception:
-            pass
-
-        logger.debug("user turn: %s said '%s'", participant_identity, transcript[:80])
-
-        # Route to active game flow
-        if self._trivia_flow:
-            self._trivia_flow.receive_answer(participant_identity, transcript)
+            logger.exception("participant STT stream error for %s", identity)
+        finally:
+            feed_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await feed_task
 
     # -- game flow -------------------------------------------------------- #
 
@@ -225,6 +284,31 @@ class GameModerator(Agent):
             snapshot = await self._api.get_snapshot(self._session_id)
         except Exception:
             logger.warning("failed to re-fetch snapshot after start, using original")
+
+        # Broadcast initial score.updated entries so the client can build its name map
+        # before any trivia.answer.detected events arrive.
+        # Bug 1: also seed the HUD renderer so it shows the leaderboard immediately
+        # instead of "Waiting for players…" throughout the game.
+        try:
+            participants = (snapshot or {}).get("state", {}).get("participants", [])
+            initial_scores: list[tuple[str, int]] = []
+            for p in participants:
+                identity = p.get("identity", "")
+                if not identity or identity == "moderator-ai":
+                    continue
+                display_name = p.get("display_name") or p.get("displayName") or identity
+                await self._events.broadcast("score.updated", {
+                    "participant_identity": identity,
+                    "display_name": display_name,
+                    "score": p.get("score", 0),
+                    "delta": 0,
+                    "reason": "session_start_sync",
+                })
+                initial_scores.append((display_name, p.get("score", 0)))
+            if self._renderer and initial_scores:
+                self._renderer.update_scores(initial_scores)
+        except Exception:
+            logger.warning("failed to broadcast initial participant names", exc_info=True)
 
         # Extract config from snapshot
         topic = "General Knowledge"

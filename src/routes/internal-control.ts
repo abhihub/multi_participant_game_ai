@@ -3,7 +3,7 @@ import { FastifyInstance } from "fastify";
 import { ZodTypeProvider } from "fastify-type-provider-zod";
 import {
   SessionIdParam, OkResponse, ReasonRequest, HealthResponse,
-  AdvanceRoundResponse,
+  AdvanceRoundResponse, FloorControlRequest, FloorControlResponse,
 } from "../schemas/index.js";
 
 const startTime = Date.now();
@@ -92,6 +92,43 @@ export default async function internalControlRoutes(fastify: FastifyInstance) {
     }
 
     return { ok: true as const };
+  });
+
+  // POST /internal/v1/sessions/:session_id/floor  (moderator floor control)
+  app.post("/internal/v1/sessions/:session_id/floor", {
+    schema: {
+      params: SessionIdParam,
+      body: FloorControlRequest,
+      response: { 200: FloorControlResponse },
+    },
+    preHandler: [fastify.verifyInternal],
+  }, async (request) => {
+    const { session_id } = request.params;
+    const { mode, allowed_roles, allowed_identities, duration_ms, reason } = request.body;
+
+    const floor = fastify.sessionStore.setFloor(session_id, {
+      mode,
+      allowed_roles,
+      allowed_identities,
+      duration_ms,
+    });
+
+    fastify.eventBus.emit(session_id, "floor.changed", {
+      floor,
+      changed_by: "moderator",
+      reason: reason ?? null,
+    });
+
+    return {
+      ok: true as const,
+      floor: {
+        mode: floor.mode,
+        allowed_roles: floor.allowed_roles ?? null,
+        allowed_identities: floor.allowed_identities ?? null,
+        held_by: floor.held_by ?? null,
+        expires_at_ms: floor.expires_at_ms ?? null,
+      },
+    };
   });
 
   // POST /internal/v1/sessions/:session_id/advance-round

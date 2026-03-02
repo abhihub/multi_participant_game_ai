@@ -1,6 +1,7 @@
 "use client";
 import { useParticipants, useTracks, VideoTrack, AudioTrack } from "@livekit/components-react";
-import { Track } from "livekit-client";
+import type { TrackReference } from "@livekit/components-react";
+import { Track, ParticipantKind } from "livekit-client";
 import ModeratorTile from "./ModeratorTile";
 
 interface Props {
@@ -12,10 +13,22 @@ export default function VideoGrid({ myIdentity }: Props) {
   const videoTracks = useTracks([Track.Source.Camera]);
   const audioTracks = useTracks([Track.Source.Microphone]);
 
-  const moderator = participants.find((p) => p.identity.startsWith("moderator"));
-  const players = participants.filter((p) => !p.identity.startsWith("moderator"));
+  // Agent participants (ParticipantKind.AGENT = 3) are the AI moderator.
+  // Also guard against the pre-minted "moderator_" identity token as a fallback.
+  const players = participants.filter(
+    (p) => p.kind !== ParticipantKind.AGENT && !p.identity.startsWith("moderator_"),
+  );
 
-  // Render audio for all remote participants (including moderator voice)
+  // Find the moderator's HUD video track published by VideoRenderer.
+  // Only use it if publication is defined (i.e. it's a real TrackReference, not a placeholder).
+  const moderatorVideoTrack = videoTracks.find(
+    (t) =>
+      (t.participant.kind === ParticipantKind.AGENT ||
+        t.participant.identity.startsWith("moderator_")) &&
+      t.publication !== undefined,
+  ) as TrackReference | undefined;
+
+  // Render audio for all remote participants (including moderator TTS voice)
   const remoteAudio = audioTracks.filter((t) => t.participant.identity !== myIdentity);
 
   return (
@@ -37,8 +50,8 @@ export default function VideoGrid({ myIdentity }: Props) {
           gap: 12,
         }}
       >
-        {/* Moderator HUD tile — always first */}
-        <ModeratorTile />
+        {/* Moderator HUD tile — always first, shows live HUD video when available */}
+        <ModeratorTile videoTrack={moderatorVideoTrack} />
 
         {/* Player tiles */}
         {players.map((participant) => {
@@ -121,8 +134,8 @@ export default function VideoGrid({ myIdentity }: Props) {
           );
         })}
 
-        {/* Placeholder if no moderator has joined yet */}
-        {!moderator && players.length === 0 && (
+        {/* Placeholder if no one has joined yet */}
+        {players.length === 0 && !moderatorVideoTrack && (
           <div
             style={{
               background: "#111",

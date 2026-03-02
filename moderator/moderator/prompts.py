@@ -26,8 +26,12 @@ Generate a trivia question.
 
 Topic: {topic}
 Difficulty: {difficulty}
+Previously asked (do not repeat): {asked_questions}
 
-Respond with a JSON object containing:
+Respond ONLY with a JSON object — no markdown, no code fences, no explanation. Example:
+{{"question": "...", "answer": "...", "accept_also": ["..."], "hint": "..."}}
+
+Fields:
 - "question": the trivia question text
 - "answer": the correct answer
 - "accept_also": list of alternative acceptable answers
@@ -45,13 +49,18 @@ Expected answer: {expected_answer}
 Also accept: {accept_also}
 Player said: "{transcript}"
 
-Determine if the player's answer is correct. Consider:
-- Speech-to-text may introduce minor errors
-- Accept phonetically similar words
+Determine if the player's answer is correct. Be GENEROUS — favour the player when in doubt.
+- Speech-to-text may introduce minor errors; judge the likely intended word, not the literal transcript
+- Accept phonetically similar words (e.g. "pari" → "Paris")
 - Accept reasonable abbreviations or alternate phrasings
-- The core concept must match
+- If the transcript is a full sentence, extract the core answer from it (e.g. "I think it is Paris" → "Paris")
+- The core concept must match the expected answer or an accepted alternative
+- Err on the side of marking correct when the right concept is clearly present
 
-Respond with a JSON object:
+Respond ONLY with a JSON object — no markdown, no code fences, no explanation. Example:
+{{"is_correct": true, "confidence": 0.95, "rationale": "..."}}
+
+Fields:
 - "is_correct": true or false
 - "confidence": 0.0 to 1.0
 - "rationale": brief explanation of your judgment

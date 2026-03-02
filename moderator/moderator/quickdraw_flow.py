@@ -93,15 +93,18 @@ class QuickDrawFlow:
         if self._renderer:
             try:
                 snapshot = await self._api.get_snapshot(self._session_id)
-                participants = snapshot.get("participants", [])
+                participants = [
+                    p for p in snapshot.get("state", {}).get("participants", [])
+                    if p.get("identity") != "moderator-ai"
+                ]
                 if participants:
                     scores = [
-                        (p.get("displayName") or p.get("identity", "?"), p.get("score", 0))
+                        (p.get("display_name") or p.get("displayName") or p.get("identity", "?"), p.get("score", 0))
                         for p in participants
                     ]
                     self._renderer.update_scores(scores)
                     top = max(participants, key=lambda p: p.get("score", 0))
-                    winner_name = top.get("displayName") or top.get("identity", "Unknown")
+                    winner_name = top.get("display_name") or top.get("displayName") or top.get("identity", "Unknown")
                     self._renderer.show_winner(winner_name)
                     self._renderer.trigger_confetti()
             except Exception:
@@ -229,9 +232,12 @@ class QuickDrawFlow:
                     if self._renderer:
                         try:
                             snapshot = await self._api.get_snapshot(self._session_id)
-                            participants = snapshot.get("participants", [])
+                            participants = [
+                                p for p in snapshot.get("state", {}).get("participants", [])
+                                if p.get("identity") != "moderator-ai"
+                            ]
                             scores = [
-                                (p.get("displayName") or p.get("identity", "?"), p.get("score", 0))
+                                (p.get("display_name") or p.get("displayName") or p.get("identity", "?"), p.get("score", 0))
                                 for p in participants
                             ]
                             self._renderer.update_scores(scores)

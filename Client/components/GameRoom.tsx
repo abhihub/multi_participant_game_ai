@@ -1,6 +1,6 @@
 "use client";
 import "@livekit/components-styles";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   LiveKitRoom,
   useLocalParticipant,
@@ -12,10 +12,12 @@ import dynamic from "next/dynamic";
 
 import { GameProvider, useGame } from "../lib/gameStore";
 import type { GameEventEnvelope } from "../lib/events";
+import type { EvModeratorSpeakStarted, EvScoreUpdated } from "../lib/events";
 import VideoGrid from "./VideoGrid";
 import GameControls from "./GameControls";
 import QuestionBanner from "./QuestionBanner";
 import EventLog from "./EventLog";
+import ConversationLog, { ConversationEntry } from "./ConversationLog";
 
 // Confetti has no SSR support — load client-side only
 const Confetti = dynamic(() => import("react-confetti"), { ssr: false });
@@ -62,6 +64,31 @@ function GameRoomInner({
   const { state, handleEvent, clearConfetti } = useGame();
 
   const [windowSize, setWindowSize] = useState({ width: 0, height: 0 });
+  // Tracks the user's own mute preference (independent of floor control)
+  const [userMuted, setUserMuted] = useState(false);
+
+  const [conversationLog, setConversationLog] = useState<ConversationEntry[]>([]);
+  const [participantNames, setParticipantNames] = useState<Record<string, string>>({});
+  // Bug 2: ref mirror so onData can read latest names without stale closure
+  const participantNamesRef = useRef<Record<string, string>>({});
+  useEffect(() => { participantNamesRef.current = participantNames; }, [participantNames]);
+
+  const addEntry = useCallback((entry: Omit<ConversationEntry, "id">) => {
+    const ts = new Date(entry.timestamp).toTimeString().slice(0, 8);
+    if (entry.role === "moderator") {
+      console.log(`%c[${ts}] 🤖 QuizBot: ${entry.text}`, "color:#3b82f6;font-weight:bold");
+    } else if (entry.role === "player") {
+      const badge = entry.verdict === "correct" ? "✓" : "✗";
+      const style = entry.verdict === "correct" ? "color:#10b981" : "color:#ef4444";
+      console.log(`%c[${ts}] 👤 ${entry.senderName} ${badge}: ${entry.text}`, style);
+    } else {
+      console.log(`%c[${ts}] ${entry.text}`, "color:#6b7280;font-style:italic");
+    }
+    setConversationLog(prev => [
+      ...prev.slice(-199),
+      { ...entry, id: `${entry.timestamp}-${Math.random()}` },
+    ]);
+  }, []);
 
   // Track window size for confetti canvas
   useEffect(() => {
@@ -88,6 +115,33 @@ function GameRoomInner({
         const text = new TextDecoder().decode(payload);
         const event = JSON.parse(text) as GameEventEnvelope;
         handleEvent(event);
+
+        const { type, payload: p, ts_ms } = event;
+        if (type === "moderator.speak.started") {
+          const ev = p as unknown as EvModeratorSpeakStarted;
+          addEntry({ timestamp: ts_ms, senderName: "QuizBot", text: ev.text, role: "moderator" });
+        } else if (type === "trivia.answer.detected") {
+          const ev = p as { participant_identity?: string; transcript?: string; is_correct?: boolean };
+          if (ev.participant_identity && ev.transcript) {
+            const name = participantNamesRef.current[ev.participant_identity] ?? ev.participant_identity;
+            addEntry({
+              timestamp: ts_ms, senderName: name, text: ev.transcript, role: "player",
+              verdict: ev.is_correct ? "correct" : "wrong",
+            });
+          }
+        } else if (type === "score.updated") {
+          const ev = p as unknown as EvScoreUpdated & { display_name?: string };
+          if (ev.display_name) {
+            setParticipantNames(prev => ({ ...prev, [ev.participant_identity]: ev.display_name! }));
+          }
+        } else if (type === "trivia.question") {
+          const ev = p as { prompt: string };
+          addEntry({ timestamp: ts_ms, senderName: "", text: `— "${ev.prompt}" —`, role: "system" });
+        } else if (type === "session.started") {
+          addEntry({ timestamp: ts_ms, senderName: "", text: "Game started", role: "system" });
+        } else if (type === "session.ended") {
+          addEntry({ timestamp: ts_ms, senderName: "", text: "Game ended", role: "system" });
+        }
       } catch {
         // ignore malformed messages
       }
@@ -97,21 +151,31 @@ function GameRoomInner({
     return () => {
       room.off(RoomEvent.DataReceived, onData);
     };
-  }, [room, handleEvent]);
+  }, [room, handleEvent, addEntry]);
 
-  // Honour floor control: mute/unmute mic automatically
+  // Honour floor control: mute/unmute mic automatically.
+  // When floor opens, only restore mic if the user hasn't manually muted themselves.
   useEffect(() => {
     if (!localParticipant) return;
-    const shouldMute = state.floor.mode === "moderator_only";
+    const floorMuted = state.floor.mode === "moderator_only";
     const pub = localParticipant.getTrackPublication(Track.Source.Microphone);
     if (!pub) return;
 
-    if (shouldMute && !pub.isMuted) {
+    if (floorMuted && !pub.isMuted) {
       localParticipant.setMicrophoneEnabled(false);
-    } else if (!shouldMute && pub.isMuted && state.status === "running") {
+    } else if (!floorMuted && pub.isMuted && state.status === "running" && !userMuted) {
       localParticipant.setMicrophoneEnabled(true);
     }
-  }, [state.floor.mode, state.status, localParticipant]);
+  }, [state.floor.mode, state.status, localParticipant, userMuted]);
+
+  function toggleMute() {
+    if (!localParticipant) return;
+    const next = !userMuted;
+    setUserMuted(next);
+    localParticipant.setMicrophoneEnabled(!next);
+  }
+
+  const floorLocked = state.floor.mode === "moderator_only";
 
   const isAdmin = role === "host" && !!sessionAdminToken;
 
@@ -162,49 +226,54 @@ function GameRoomInner({
 
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <StatusBadge status={state.status} />
-          {state.floor.mode !== "open" && <FloorBadge />}
+          <MuteButton muted={userMuted || floorLocked} floorLocked={floorLocked} onToggle={toggleMute} />
           <span style={{ fontSize: 13, color: "#6b7280" }}>
             {displayName} · {role}
           </span>
         </div>
       </div>
 
-      {/* Main scrollable area */}
-      <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
-        <div
-          style={{
-            maxWidth: 1100,
-            margin: "0 auto",
-            display: "flex",
-            flexDirection: "column",
-            gap: 16,
-          }}
-        >
-          <QuestionBanner />
+      {/* Content + log section fills remaining height */}
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minHeight: 0 }}>
+        {/* Scrollable content — shrinks to fit, scrolls when too tall */}
+        <div style={{ flex: "0 1 auto", overflowY: "auto", padding: 16, maxHeight: "55%" }}>
+          <div
+            style={{
+              maxWidth: 1100,
+              margin: "0 auto",
+              display: "flex",
+              flexDirection: "column",
+              gap: 16,
+            }}
+          >
+            <QuestionBanner />
 
-          <VideoGrid myIdentity={localParticipant?.identity ?? ""} />
+            <VideoGrid myIdentity={localParticipant?.identity ?? ""} />
 
-          {isAdmin && (
-            <GameControls sessionId={sessionId} adminToken={sessionAdminToken!} />
-          )}
+            {isAdmin && (
+              <GameControls sessionId={sessionId} adminToken={sessionAdminToken!} />
+            )}
 
-          <details>
-            <summary
-              style={{
-                cursor: "pointer",
-                fontSize: 13,
-                color: "#4b5563",
-                padding: "4px 0",
-                userSelect: "none",
-              }}
-            >
-              Debug: Event Log
-            </summary>
-            <div style={{ marginTop: 8 }}>
-              <EventLog />
-            </div>
-          </details>
+            <details>
+              <summary
+                style={{
+                  cursor: "pointer",
+                  fontSize: 13,
+                  color: "#4b5563",
+                  padding: "4px 0",
+                  userSelect: "none",
+                }}
+              >
+                Debug: Event Log
+              </summary>
+              <div style={{ marginTop: 8 }}>
+                <EventLog />
+              </div>
+            </details>
+          </div>
         </div>
+
+        <ConversationLog entries={conversationLog} />
       </div>
     </div>
   );
@@ -250,5 +319,42 @@ function FloorBadge() {
     >
       🎙 Mic muted
     </span>
+  );
+}
+
+function MuteButton({
+  muted,
+  floorLocked,
+  onToggle,
+}: {
+  muted: boolean;
+  floorLocked: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      onClick={onToggle}
+      disabled={floorLocked}
+      title={floorLocked ? "Muted by moderator" : muted ? "Unmute microphone" : "Mute microphone"}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 5,
+        padding: "4px 12px",
+        borderRadius: 20,
+        border: "1px solid",
+        borderColor: floorLocked ? "#7c2d12" : muted ? "#374151" : "#065f46",
+        background: floorLocked ? "#7c2d12" : muted ? "#1f2937" : "#064e3b",
+        color: floorLocked ? "#fdba74" : muted ? "#9ca3af" : "#34d399",
+        fontSize: 12,
+        fontWeight: 700,
+        cursor: floorLocked ? "not-allowed" : "pointer",
+        transition: "background 0.15s, border-color 0.15s",
+        opacity: floorLocked ? 0.8 : 1,
+      }}
+    >
+      {muted ? "🔇" : "🎙"}{" "}
+      {floorLocked ? "Muted" : muted ? "Unmute" : "Mute"}
+    </button>
   );
 }

@@ -216,7 +216,7 @@ class ApiClient:
         if reason is not None:
             body["reason"] = reason
         return await self._post(
-            f"/v1/sessions/{session_id}/actions/floor", body, admin=True
+            f"/internal/v1/sessions/{session_id}/floor", body
         )
 
     # -- public endpoints ------------------------------------------------- #
