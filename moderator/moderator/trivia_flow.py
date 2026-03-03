@@ -143,11 +143,28 @@ class TriviaFlow:
         Identity is bound at the track level — no inference needed.
         """
         if self._current_question is None:
+            logger.info(
+                "receive_answer: no active question, discarding from %s: %r",
+                participant_identity, transcript[:60],
+            )
             return
         # Discard STT callbacks that fire while the bot is speaking
         # (echo from TTS playback leaking through the room mic)
         if self._is_speaking:
-            logger.debug("receive_answer: ignoring transcript during bot speech: %s", transcript[:60])
+            logger.info(
+                "receive_answer: ignoring (bot speaking) from %s: %r",
+                participant_identity, transcript[:60],
+            )
+            return
+        already_answered = any(
+            a.participant_identity == participant_identity
+            for a in self._pending_answers
+        )
+        if already_answered:
+            logger.info(
+                "receive_answer: ignoring duplicate from %s: %r",
+                participant_identity, transcript[:60],
+            )
             return
         self._pending_answers.append(
             PendingAnswer(
@@ -192,7 +209,10 @@ class TriviaFlow:
             "question_number": round_number,
         })
 
-        # 5. Open the floor for answers
+        # 5. Say "Go ahead" first (floor still moderator_only → players still muted)
+        await self._say("Go ahead — shout out your answer!")
+
+        # 6. Open the floor AFTER TTS finishes so _is_speaking is already False
         try:
             await self._api.set_floor(self._session_id, "open", reason="answer window")
             await self._events.broadcast("floor.changed", {
@@ -203,8 +223,7 @@ class TriviaFlow:
         except Exception:
             logger.warning("failed to set floor to open, continuing anyway")
 
-        # 6. Wait for answers
-        await self._say("Go ahead — shout out your answer!")
+        # 7. Wait for answers
         await asyncio.sleep(config.trivia_answer_timeout_ms / 1000.0)
 
         # 7. Close the floor (stops new speech from entering)
@@ -227,6 +246,7 @@ class TriviaFlow:
         self._current_question = None
         answers = list(self._pending_answers)
         self._pending_answers.clear()
+        logger.info("answer window closed: %d answer(s) collected", len(answers))
 
         if not answers:
             await self._say("No one answered! The correct answer was: " + question.answer)
@@ -243,12 +263,19 @@ class TriviaFlow:
         winner = await self._judge_answers(question, answers, round_id, question_asked_at_ms)
 
         # Fetch snapshot to get updated scores, then broadcast to clients and update HUD
+        winner_name_map: dict[str, str] = {}
         try:
             snapshot = await self._api.get_snapshot(self._session_id)
             participants = [
                 p for p in snapshot.get("state", {}).get("participants", [])
                 if p.get("identity") != "moderator-ai"
             ]
+            winner_name_map = {
+                p.get("identity", ""): (
+                    p.get("display_name") or p.get("displayName") or p.get("identity", "?")
+                )
+                for p in participants
+            }
             for p in participants:
                 await self._events.broadcast("score.updated", {
                     "participant_identity": p.get("identity", ""),
@@ -268,7 +295,8 @@ class TriviaFlow:
 
         # 10. Announce result
         if winner:
-            await self._say(f"Correct! {winner} got it right! The answer is {question.answer}.")
+            winner_display = winner_name_map.get(winner, winner)
+            await self._say(f"Correct! {winner_display} got it right! The answer is {question.answer}.")
         else:
             await self._say(f"Nobody got it this time. The answer was: {question.answer}")
         if self._renderer:
@@ -371,6 +399,10 @@ class TriviaFlow:
             if is_correct and winner is None:
                 winner = answer.participant_identity
 
+            logger.info(
+                "broadcasting trivia.answer.detected: participant=%s is_correct=%s transcript=%r",
+                answer.participant_identity, is_correct, answer.transcript[:60],
+            )
             await self._events.broadcast("trivia.answer.detected", {
                 "round_id": round_id,
                 "question_id": question.question_id,
@@ -396,10 +428,16 @@ class TriviaFlow:
         if self._renderer:
             self._renderer.set_speaking(True)
         try:
-            await self._session.say(text)
-            # Trailing buffer: audio playback + STT/VAD lag continue ~500ms
-            # after the coroutine returns. Keep the gate up a bit longer.
-            await asyncio.sleep(0.6)
+            logger.info("TTS say: %r", text)
+            try:
+                await self._session.say(text)
+                # Trailing buffer: audio playback + STT/VAD lag continue ~500ms
+                # after the coroutine returns. Keep the gate up a bit longer.
+                await asyncio.sleep(0.6)
+            except RuntimeError as exc:
+                logger.warning("TTS say() failed (session may be closing): %s", exc)
+                return
+            logger.info("TTS done")
         finally:
             self._is_speaking = False
             if self._renderer:

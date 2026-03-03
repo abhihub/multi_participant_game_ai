@@ -276,7 +276,13 @@ class QuickDrawFlow:
         if self._renderer:
             self._renderer.set_speaking(True)
         try:
-            await self._session.say(text)
+            logger.info("TTS say: %r", text)
+            try:
+                await self._session.say(text)
+            except RuntimeError as exc:
+                logger.warning("TTS say() failed (session may be closing): %s", exc)
+                return
+            logger.info("TTS done")
         finally:
             if self._renderer:
                 self._renderer.set_speaking(False)

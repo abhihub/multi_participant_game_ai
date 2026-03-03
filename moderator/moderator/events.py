@@ -37,10 +37,14 @@ class EventBroadcaster:
             "payload": payload,
         }
         data = json.dumps(envelope).encode("utf-8")
-        await self._room.local_participant.publish_data(
-            payload=data,
-            reliable=True,
-            topic=config.event_topic,
-        )
-        logger.debug("broadcast event seq=%d type=%s", self._seq, event_type)
+        try:
+            await self._room.local_participant.publish_data(
+                payload=data,
+                reliable=True,
+                topic=config.event_topic,
+            )
+            logger.info("broadcast OK  seq=%d type=%s bytes=%d", self._seq, event_type, len(data))
+        except Exception as exc:
+            logger.error("broadcast FAILED seq=%d type=%s: %s", self._seq, event_type, exc)
+            raise
         return self._seq

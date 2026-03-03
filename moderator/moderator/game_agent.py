@@ -222,14 +222,25 @@ class GameModerator(Agent):
             async for ev in stt_stream:
                 if ev.type == _stt_types.SpeechEventType.FINAL_TRANSCRIPT:
                     text = ev.alternatives[0].text if ev.alternatives else ""
-                    if text.strip() and self._trivia_flow:
-                        logger.debug("participant STT: %s said '%s'", identity, text[:80])
-                        self._trivia_flow.receive_answer(identity, text)
+                    if text.strip():
+                        if self._trivia_flow:
+                            logger.info("participant STT final: %s said %r", identity, text[:80])
+                            self._trivia_flow.receive_answer(identity, text)
+                        else:
+                            logger.info(
+                                "participant STT final (no active flow): %s said %r",
+                                identity, text[:80],
+                            )
+                elif ev.type == _stt_types.SpeechEventType.INTERIM_TRANSCRIPT:
+                    text = ev.alternatives[0].text if ev.alternatives else ""
+                    if text.strip():
+                        logger.debug("participant STT interim: %s: %r", identity, text[:60])
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("participant STT stream error for %s", identity)
         finally:
+            logger.info("STT stream ended for participant: %s", identity)
             feed_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await feed_task

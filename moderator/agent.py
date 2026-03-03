@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 # Load environment before importing agents (they read LIVEKIT_* vars at import)
 load_dotenv(".env.local")
 
-from livekit.agents import AgentSession, JobContext, WorkerOptions, cli  # noqa: E402
+from livekit.agents import AgentSession, JobContext, RoomInputOptions, WorkerOptions, cli  # noqa: E402
 from livekit.plugins import cartesia, deepgram, openai, silero  # noqa: E402
 
 from moderator.api_client import ApiClient  # noqa: E402
@@ -91,7 +91,11 @@ async def entrypoint(ctx: JobContext) -> None:
     )
 
     agent = GameModerator(ctx=ctx)
-    await session.start(room=ctx.room, agent=agent)
+    await session.start(
+        room=ctx.room,
+        agent=agent,
+        room_input_options=RoomInputOptions(close_on_disconnect=False),
+    )
 
 
 if __name__ == "__main__":
