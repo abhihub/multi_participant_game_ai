@@ -22,23 +22,33 @@ Do NOT repeat the full question when announcing results.
 """
 
 TRIVIA_QUESTION_GENERATOR = """\
-Generate a trivia question.
+You are a trivia question writer creating a question for a live multiplayer game show.
 
 Topic: {topic}
 Difficulty: {difficulty}
-Previously asked (do not repeat): {asked_questions}
+Previously asked this session (do not repeat these): {asked_questions}
+Random seed (use this to pick a fresh, unexpected angle): {seed}
 
-Respond ONLY with a JSON object — no markdown, no code fences, no explanation. Example:
+Your goal is to pick a question that feels fun and surprising — NOT the most obvious \
+question about this topic. Think of an interesting angle, a lesser-known fact, or a \
+specific sub-category within "{topic}" that players will find engaging. \
+Vary the style: sometimes ask about history, sometimes science, geography, pop culture, \
+records ("biggest", "first", "oldest"), or famous names.
+
+Rules:
+- The question must have ONE clear, unambiguous correct answer
+- Do not ask the same kind of question twice (avoid repeating already-asked questions above)
+- Match the difficulty: easy = widely known facts; medium = need to think; hard = specialist knowledge
+- Keep the question to one or two sentences
+
+Respond ONLY with a JSON object — no markdown, no code fences, no explanation:
 {{"question": "...", "answer": "...", "accept_also": ["..."], "hint": "..."}}
 
 Fields:
 - "question": the trivia question text
-- "answer": the correct answer
-- "accept_also": list of alternative acceptable answers
-- "hint": a one-sentence hint (optional)
-
-The question should be clear, unambiguous, and have a single definitive answer.
-Keep questions concise (one or two sentences).
+- "answer": the single correct answer (keep it short — a word or short phrase)
+- "accept_also": list of alternate phrasings/abbreviations that should also be accepted
+- "hint": a one-sentence hint the host can use if nobody answers (optional)
 """
 
 TRIVIA_ANSWER_JUDGE = """\

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -41,6 +42,15 @@ class PendingAnswer:
     received_at_ms: int
 
 
+@dataclass
+class JudgedAnswer:
+    participant_identity: str
+    transcript: str
+    received_at_ms: int
+    is_correct: bool
+    confidence: float
+
+
 class TriviaFlow:
     """Drives a trivia game session round by round.
 
@@ -50,10 +60,10 @@ class TriviaFlow:
       3. Set floor to moderator_only (mute players)
       4. Speak the question via TTS
       5. Broadcast trivia.question event
-      6. Set floor to open (unmute players)
-      7. Collect answers within the timeout window
+      6. Set floor to open (unmute players)  ← _current_question set here
+      7. Collect answers within the timeout window (event-based early close)
       8. Grace window (let in-flight STT finals arrive)
-      9. Judge each answer via LLM
+      9. Judge each answer via LLM (using cached early judgments where available)
       10. Submit decisions to Game Engine API
       11. Announce results
     """
@@ -82,6 +92,10 @@ class TriviaFlow:
         self._asked_questions: list[str] = []
         # Gate: discard STT callbacks while bot TTS is playing
         self._is_speaking = False
+        self._speak_lock = asyncio.Lock()
+        # Early-close machinery: correct answer triggers event before timeout
+        self._early_close_event: asyncio.Event = asyncio.Event()
+        self._judged_answers: dict[str, JudgedAnswer] = {}  # keyed by participant_identity
 
     # -- public API ------------------------------------------------------- #
 
@@ -92,6 +106,7 @@ class TriviaFlow:
 
         await self._say("Welcome to trivia! I'll be your host today. Let's get started!")
 
+        prefetched: TriviaQuestion | None = None
         for round_idx in range(num_rounds):
             if not self._running:
                 break
@@ -106,7 +121,7 @@ class TriviaFlow:
                 break
 
             round_id = f"rnd_{round_idx}"
-            await self._play_round(round_id, round_idx + 1)
+            prefetched = await self._play_round(round_id, round_idx + 1, prefetched=prefetched)
 
         if self._running:
             await self._say("That's all the questions! Thanks for playing!")
@@ -175,14 +190,35 @@ class TriviaFlow:
         )
         logger.info("answer queued from %s: %s", participant_identity, transcript[:80])
 
+        # Spawn background judgment so a correct answer can close the window early
+        if self._current_question is not None:
+            asyncio.create_task(
+                self._judge_early(participant_identity, transcript, self._current_question)
+            )
+
     # -- round logic ------------------------------------------------------ #
 
-    async def _play_round(self, round_id: str, round_number: int) -> None:
-        """Execute a single trivia round."""
-        # 1. Generate question
-        question = await self._generate_question(round_id)
-        self._current_question = question
+    async def _play_round(
+        self,
+        round_id: str,
+        round_number: int,
+        prefetched: TriviaQuestion | None = None,
+    ) -> TriviaQuestion | None:
+        """Execute a single trivia round.
+
+        Returns a pre-generated question for the next round (generated
+        concurrently during the result announcement to hide LLM latency).
+        """
+        # 1. Use pre-fetched question if available, otherwise generate now
+        if prefetched is not None:
+            question = prefetched
+            logger.info("using pre-fetched question: %s", question.question)
+        else:
+            question = await self._generate_question(round_id)
+
+        # Reset per-round state (before _current_question is set)
         self._pending_answers.clear()
+        self._judged_answers.clear()
 
         # 2. Mute players while we speak the question
         try:
@@ -195,11 +231,14 @@ class TriviaFlow:
         except Exception:
             logger.warning("failed to set floor to moderator_only, continuing anyway")
 
-        # 3. Show question on HUD then speak it
+        # 3. Show question on HUD, then speak question + go-ahead as one utterance
+        #    (two separate _say calls create a noticeable robotic pause between them)
         if self._renderer:
             self._renderer.set_question(question.question)
         question_asked_at_ms = int(time.time() * 1000)
-        await self._say(f"Question {round_number}: {question.question}")
+        await self._say(
+            f"Question {round_number}: {question.question} Go ahead and shout out your answer!"
+        )
 
         # 4. Broadcast trivia.question event
         await self._events.broadcast("trivia.question", {
@@ -209,8 +248,11 @@ class TriviaFlow:
             "question_number": round_number,
         })
 
-        # 5. Say "Go ahead" first (floor still moderator_only → players still muted)
-        await self._say("Go ahead — shout out your answer!")
+        # 5. Set _current_question immediately before opening the floor so that
+        #    any STT echo from the question reading above is still discarded
+        #    (_current_question was None during TTS → receive_answer discards it).
+        self._early_close_event.clear()
+        self._current_question = question
 
         # 6. Open the floor AFTER TTS finishes so _is_speaking is already False
         try:
@@ -223,10 +265,17 @@ class TriviaFlow:
         except Exception:
             logger.warning("failed to set floor to open, continuing anyway")
 
-        # 7. Wait for answers
-        await asyncio.sleep(config.trivia_answer_timeout_ms / 1000.0)
+        # 7. Wait for answers — exits early if a correct answer arrives
+        try:
+            await asyncio.wait_for(
+                self._early_close_event.wait(),
+                timeout=config.trivia_answer_timeout_ms / 1000.0,
+            )
+            logger.info("answer window: early close triggered by correct answer")
+        except asyncio.TimeoutError:
+            logger.info("answer window: timeout elapsed")
 
-        # 7. Close the floor (stops new speech from entering)
+        # 8. Close the floor (stops new speech from entering)
         try:
             await self._api.set_floor(self._session_id, "moderator_only", reason="judging")
             await self._events.broadcast("floor.changed", {
@@ -237,16 +286,22 @@ class TriviaFlow:
         except Exception:
             logger.warning("failed to set floor to moderator_only for judging")
 
-        # 8. Grace window: STT finals for in-window speech arrive ~500ms after
+        # 9. Grace window: STT finals for in-window speech arrive ~500ms after
         #    speech ends. Without this, answers near the end of the window are
         #    silently dropped because _current_question is already None.
         await asyncio.sleep(1.5)
 
-        # 9. Close answer gate
+        # 10. Close answer gate
         self._current_question = None
         answers = list(self._pending_answers)
         self._pending_answers.clear()
         logger.info("answer window closed: %d answer(s) collected", len(answers))
+
+        # Start pre-generating the next question NOW, concurrently with the
+        # result announcement, so the LLM latency is hidden inside the TTS time.
+        prefetch_task: asyncio.Task[TriviaQuestion] | None = None
+        if self._running:
+            prefetch_task = asyncio.create_task(self._generate_question("prefetch"))
 
         if not answers:
             await self._say("No one answered! The correct answer was: " + question.answer)
@@ -258,52 +313,59 @@ class TriviaFlow:
                 "winner": None,
                 "correct_answer": question.answer,
             })
-            return
-
-        winner = await self._judge_answers(question, answers, round_id, question_asked_at_ms)
-
-        # Fetch snapshot to get updated scores, then broadcast to clients and update HUD
-        winner_name_map: dict[str, str] = {}
-        try:
-            snapshot = await self._api.get_snapshot(self._session_id)
-            participants = [
-                p for p in snapshot.get("state", {}).get("participants", [])
-                if p.get("identity") != "moderator-ai"
-            ]
-            winner_name_map = {
-                p.get("identity", ""): (
-                    p.get("display_name") or p.get("displayName") or p.get("identity", "?")
-                )
-                for p in participants
-            }
-            for p in participants:
-                await self._events.broadcast("score.updated", {
-                    "participant_identity": p.get("identity", ""),
-                    "display_name": p.get("display_name") or p.get("displayName") or p.get("identity", ""),
-                    "score": p.get("score", 0),
-                    "delta": 0,
-                    "reason": "round_end_sync",
-                })
-            if self._renderer:
-                scores = [
-                    (p.get("display_name") or p.get("displayName") or p.get("identity", "?"), p.get("score", 0))
-                    for p in participants
-                ]
-                self._renderer.update_scores(scores)
-        except Exception:
-            logger.warning("failed to sync scores after round", exc_info=True)
-
-        # 10. Announce result
-        if winner:
-            winner_display = winner_name_map.get(winner, winner)
-            await self._say(f"Correct! {winner_display} got it right! The answer is {question.answer}.")
         else:
-            await self._say(f"Nobody got it this time. The answer was: {question.answer}")
-        if self._renderer:
-            self._renderer.set_question("")
+            winner = await self._judge_answers(question, answers, round_id, question_asked_at_ms)
 
-        # Short pause between rounds
-        await asyncio.sleep(2.0)
+            # Fetch snapshot to get updated scores, then broadcast to clients and update HUD
+            winner_name_map: dict[str, str] = {}
+            try:
+                snapshot = await self._api.get_snapshot(self._session_id)
+                participants = [
+                    p for p in snapshot.get("state", {}).get("participants", [])
+                    if p.get("identity") != "moderator-ai"
+                ]
+                winner_name_map = {
+                    p.get("identity", ""): (
+                        p.get("display_name") or p.get("displayName") or p.get("identity", "?")
+                    )
+                    for p in participants
+                }
+                for p in participants:
+                    await self._events.broadcast("score.updated", {
+                        "participant_identity": p.get("identity", ""),
+                        "display_name": p.get("display_name") or p.get("displayName") or p.get("identity", ""),
+                        "score": p.get("score", 0),
+                        "delta": 0,
+                        "reason": "round_end_sync",
+                    })
+                if self._renderer:
+                    scores = [
+                        (p.get("display_name") or p.get("displayName") or p.get("identity", "?"), p.get("score", 0))
+                        for p in participants
+                    ]
+                    self._renderer.update_scores(scores)
+            except Exception:
+                logger.warning("failed to sync scores after round", exc_info=True)
+
+            # 11. Announce result
+            if winner:
+                winner_display = winner_name_map.get(winner, winner)
+                await self._say(f"Correct! {winner_display} got it right! The answer is {question.answer}.")
+            else:
+                await self._say(f"Nobody got it this time. The answer was: {question.answer}")
+            if self._renderer:
+                self._renderer.set_question("")
+
+        # Short pause then hand back the pre-fetched question.
+        # If LLM finished during the announcement it returns instantly; otherwise
+        # the await here extends the gap slightly but stays < 1s in practice.
+        await asyncio.sleep(0.5)
+        if prefetch_task is not None:
+            try:
+                return await prefetch_task
+            except Exception:
+                logger.warning("pre-fetch of next question failed", exc_info=True)
+        return None
 
     async def _generate_question(self, round_id: str) -> TriviaQuestion:
         """Use the LLM to generate a trivia question."""
@@ -315,6 +377,7 @@ class TriviaFlow:
             topic=self._topic,
             difficulty=self._difficulty,
             asked_questions=asked,
+            seed=random.randint(1, 999999),
         )
 
         try:
@@ -340,6 +403,62 @@ class TriviaFlow:
             self._asked_questions.append(fallback.question)
             return fallback
 
+    async def _judge_answer(
+        self,
+        participant_identity: str,
+        transcript: str,
+        question: TriviaQuestion,
+    ) -> JudgedAnswer:
+        """Call the LLM to judge a single answer. Returns a JudgedAnswer."""
+        prompt = TRIVIA_ANSWER_JUDGE.format(
+            question=question.question,
+            expected_answer=question.answer,
+            accept_also=", ".join(question.accept_also) if question.accept_also else "(none)",
+            transcript=transcript,
+        )
+        is_correct = False
+        confidence = 0.5
+        try:
+            data = await self._llm_json(prompt, temperature=0)
+            is_correct = bool(data.get("is_correct", False))
+            confidence = float(data.get("confidence", 0.5))
+            logger.info(
+                "judged answer from %s: '%s' → %s (confidence=%.2f, rationale=%s)",
+                participant_identity,
+                transcript[:60],
+                "CORRECT" if is_correct else "WRONG",
+                confidence,
+                data.get("rationale", ""),
+            )
+        except Exception:
+            logger.error(
+                "failed to judge answer from %s: '%s' — defaulting to wrong",
+                participant_identity, transcript[:60],
+                exc_info=True,
+            )
+        return JudgedAnswer(
+            participant_identity=participant_identity,
+            transcript=transcript,
+            received_at_ms=int(time.time() * 1000),
+            is_correct=is_correct,
+            confidence=confidence,
+        )
+
+    async def _judge_early(
+        self,
+        participant_identity: str,
+        transcript: str,
+        question: TriviaQuestion,
+    ) -> None:
+        """Judge an answer immediately as it arrives; signal early close if correct."""
+        try:
+            judged = await self._judge_answer(participant_identity, transcript, question)
+            self._judged_answers[participant_identity] = judged
+            if judged.is_correct:
+                self._early_close_event.set()
+        except Exception:
+            logger.warning("early judgment failed for %s", participant_identity, exc_info=True)
+
     async def _judge_answers(
         self,
         question: TriviaQuestion,
@@ -351,34 +470,22 @@ class TriviaFlow:
         winner: str | None = None
 
         for answer in answers:
-            prompt = TRIVIA_ANSWER_JUDGE.format(
-                question=question.question,
-                expected_answer=question.answer,
-                accept_also=", ".join(question.accept_also) if question.accept_also else "(none)",
-                transcript=answer.transcript,
-            )
-
-            is_correct = False
-            confidence = 0.5
-
-            try:
-                data = await self._llm_json(prompt)
-                is_correct = bool(data.get("is_correct", False))
-                confidence = float(data.get("confidence", 0.5))
+            # Use cached judgment from background early-judge task if available
+            if answer.participant_identity in self._judged_answers:
+                judged = self._judged_answers[answer.participant_identity]
                 logger.info(
-                    "judged answer from %s: '%s' → %s (confidence=%.2f, rationale=%s)",
+                    "using cached judgment for %s: %s",
                     answer.participant_identity,
-                    answer.transcript[:60],
-                    "CORRECT" if is_correct else "WRONG",
-                    confidence,
-                    data.get("rationale", ""),
+                    "CORRECT" if judged.is_correct else "WRONG",
                 )
-            except Exception:
-                logger.error(
-                    "failed to judge answer from %s: '%s' — defaulting to wrong",
-                    answer.participant_identity, answer.transcript[:60],
-                    exc_info=True,
+                is_correct = judged.is_correct
+                confidence = judged.confidence
+            else:
+                judged = await self._judge_answer(
+                    answer.participant_identity, answer.transcript, question
                 )
+                is_correct = judged.is_correct
+                confidence = judged.confidence
 
             # Submit decision to Game Engine
             try:
@@ -411,6 +518,7 @@ class TriviaFlow:
                 "transcript": answer.transcript,
             })
 
+        self._judged_answers.clear()
         return winner
 
     # -- helpers ---------------------------------------------------------- #
@@ -418,33 +526,49 @@ class TriviaFlow:
     async def _say(self, text: str) -> None:
         """Speak text via the agent session TTS."""
         import uuid
-        speak_id = str(uuid.uuid4())
-        await self._events.broadcast("moderator.speak.started", {
-            "speak_id": speak_id,
-            "text": text,
-            "mode": "tts",
-        })
-        self._is_speaking = True
-        if self._renderer:
-            self._renderer.set_speaking(True)
-        try:
-            logger.info("TTS say: %r", text)
-            try:
-                await self._session.say(text)
-                # Trailing buffer: audio playback + STT/VAD lag continue ~500ms
-                # after the coroutine returns. Keep the gate up a bit longer.
-                await asyncio.sleep(0.6)
-            except RuntimeError as exc:
-                logger.warning("TTS say() failed (session may be closing): %s", exc)
-                return
-            logger.info("TTS done")
-        finally:
-            self._is_speaking = False
+        async with self._speak_lock:
+            speak_id = str(uuid.uuid4())
+            end_status = "completed"
+            await self._events.broadcast("moderator.speak.started", {
+                "speak_id": speak_id,
+                "text": text,
+                "mode": "tts",
+            })
+            self._is_speaking = True
             if self._renderer:
-                self._renderer.set_speaking(False)
-            await self._events.broadcast("moderator.speak.ended", {"speak_id": speak_id})
+                self._renderer.set_speaking(True)
+            try:
+                logger.info("TTS say: %r", text)
+                last_err: Exception | None = None
+                for attempt in range(2):
+                    try:
+                        await self._session.say(text)
+                        # Trailing buffer: audio playback + STT/VAD lag continue ~500ms
+                        # after the coroutine returns. Keep the gate up a bit longer.
+                        await asyncio.sleep(0.6)
+                        logger.info("TTS done")
+                        last_err = None
+                        break
+                    except RuntimeError as exc:
+                        last_err = exc
+                        if attempt == 0:
+                            logger.warning("TTS interrupted, retrying once: %s", exc)
+                            await asyncio.sleep(0.2)
+                        else:
+                            logger.warning("TTS failed after retry: %s", exc)
+                if last_err is not None:
+                    end_status = "failed"
+                    return
+            finally:
+                self._is_speaking = False
+                if self._renderer:
+                    self._renderer.set_speaking(False)
+                await self._events.broadcast("moderator.speak.ended", {
+                    "speak_id": speak_id,
+                    "status": end_status,
+                })
 
-    async def _llm_json(self, prompt: str) -> dict:
+    async def _llm_json(self, prompt: str, temperature: float = 0.7) -> dict:
         """Call OpenAI with json_mode — guaranteed JSON, no streaming assembly needed.
 
         Uses the direct openai SDK rather than the livekit-agents LLM wrapper,
@@ -454,7 +578,7 @@ class TriviaFlow:
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
-            temperature=0,
+            temperature=temperature,
             timeout=20,
         )
         return json.loads(resp.choices[0].message.content)

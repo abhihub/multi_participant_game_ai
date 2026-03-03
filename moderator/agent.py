@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 load_dotenv(".env.local")
 
 from livekit.agents import AgentSession, JobContext, RoomInputOptions, WorkerOptions, cli  # noqa: E402
-from livekit.plugins import cartesia, deepgram, openai, silero  # noqa: E402
+from livekit.plugins import cartesia, openai  # noqa: E402
 
 from moderator.api_client import ApiClient  # noqa: E402
 from moderator.game_agent import GameModerator  # noqa: E402
@@ -79,15 +79,12 @@ async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect()
     logger.info("joined room=%s (session=%s)", ctx.room.name, session_id)
 
+    # Use a single deterministic speech path: game flows call session.say().
+    # Avoid enabling the AgentSession auto STT/VAD conversational loop, which
+    # can produce overlapping/interrupting moderator speech.
     session = AgentSession(
-        # STT: Deepgram Nova-3 (multilingual)
-        stt=deepgram.STT(model="nova-3"),
-        # LLM: OpenAI GPT-4.1-mini for question gen + judging
         llm=openai.LLM(model="gpt-4.1-mini"),
-        # TTS: Cartesia Sonic
         tts=cartesia.TTS(),
-        # VAD: Silero for voice activity detection
-        vad=silero.VAD.load(),
     )
 
     agent = GameModerator(ctx=ctx)
