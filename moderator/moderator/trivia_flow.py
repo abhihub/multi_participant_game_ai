@@ -25,6 +25,64 @@ logger = logging.getLogger(__name__)
 # reliably stream structured JSON responses in v1.4.x.
 _openai = AsyncOpenAI()
 
+# ---------------------------------------------------------------------------
+# Phrase pools — randomised each time to keep the host feeling natural
+# ---------------------------------------------------------------------------
+
+_WELCOME = [
+    "Welcome to trivia! I'll be your host today — let's get this party started!",
+    "Hey everyone, welcome to Trivia Night! I'm your host. Let's see who knows their stuff!",
+    "Welcome, welcome! It's trivia time! I'm jumping straight in — are you ready?",
+    "Good to have you all here! I'm your host for tonight's trivia. Let's kick things off!",
+    "Alright, trivia fans — welcome! I'm your host and we are starting right now!",
+]
+
+_QUESTION_INTROS = [
+    "Alright, question {n}: {q} Shout out your answer!",
+    "Here we go — {q} Who's got this one?",
+    "Question {n}: {q} Let me hear it!",
+    "For question {n}: {q} What do you think?",
+    "Here's question {n} — {q} Go for it!",
+    "Ooh, this one's good — {q} Shout it out!",
+    "Question {n}: {q} Come on, I know you know this!",
+    "Up next — {q} Go ahead, shout your answer!",
+]
+
+_CORRECT = [
+    "Yes! {name} got it! The answer is {answer}!",
+    "Correct! {name} nails it — {answer}! Well done!",
+    "That's right, {name}! It was {answer}! Brilliant!",
+    "Absolutely! {answer} — nice work, {name}!",
+    "{answer}! That's the one! Great job, {name}!",
+    "Boom! {name} knew it — {answer}! Love it!",
+    "Correct! Well played, {name} — {answer} it is!",
+]
+
+_NOBODY_GOT_IT = [
+    "Nobody got it this time! The answer was {answer}.",
+    "Ooh, tough one! Nobody got it — it was {answer}. Don't worry, more to come!",
+    "No one got it — the correct answer was {answer}. Tricky, right?",
+    "That stumped everyone! The answer was {answer}.",
+    "Ooh so close but no cigar! It was {answer}. On to the next one!",
+]
+
+_NO_ANSWERS = [
+    "Hmm, nobody answered that one! The correct answer was {answer}.",
+    "Silence! The answer was {answer} — let's keep moving!",
+    "No takers on that one! It was {answer}. Next question!",
+]
+
+_GAME_END = [
+    "And that's a wrap! What a game — thanks for playing, everyone!",
+    "That's all the questions! Incredible effort from everyone today. Thanks for playing!",
+    "And we're done! That was a fantastic game — thanks so much for playing!",
+    "That's trivia night in the books! Thanks for playing — you were all amazing!",
+]
+
+
+def _pick(options: list[str]) -> str:
+    return random.choice(options)
+
 
 @dataclass
 class TriviaQuestion:
@@ -104,7 +162,7 @@ class TriviaFlow:
         self._running = True
         logger.info("trivia flow starting: session=%s rounds=%d", self._session_id, num_rounds)
 
-        await self._say("Welcome to trivia! I'll be your host today. Let's get started!")
+        await self._say(_pick(_WELCOME))
 
         prefetched: TriviaQuestion | None = None
         for round_idx in range(num_rounds):
@@ -124,7 +182,7 @@ class TriviaFlow:
             prefetched = await self._play_round(round_id, round_idx + 1, prefetched=prefetched)
 
         if self._running:
-            await self._say("That's all the questions! Thanks for playing!")
+            await self._say(_pick(_GAME_END))
             self._running = False
 
         # Update HUD with final scores and winner banner
@@ -237,7 +295,7 @@ class TriviaFlow:
             self._renderer.set_question(question.question)
         question_asked_at_ms = int(time.time() * 1000)
         await self._say(
-            f"Question {round_number}: {question.question} Go ahead and shout out your answer!"
+            _pick(_QUESTION_INTROS).format(n=round_number, q=question.question)
         )
 
         # 4. Broadcast trivia.question event
@@ -304,7 +362,7 @@ class TriviaFlow:
             prefetch_task = asyncio.create_task(self._generate_question("prefetch"))
 
         if not answers:
-            await self._say("No one answered! The correct answer was: " + question.answer)
+            await self._say(_pick(_NO_ANSWERS).format(answer=question.answer))
             if self._renderer:
                 self._renderer.set_question("")
             await self._events.broadcast("trivia.answer.detected", {
@@ -350,9 +408,9 @@ class TriviaFlow:
             # 11. Announce result
             if winner:
                 winner_display = winner_name_map.get(winner, winner)
-                await self._say(f"Correct! {winner_display} got it right! The answer is {question.answer}.")
+                await self._say(_pick(_CORRECT).format(name=winner_display, answer=question.answer))
             else:
-                await self._say(f"Nobody got it this time. The answer was: {question.answer}")
+                await self._say(_pick(_NOBODY_GOT_IT).format(answer=question.answer))
             if self._renderer:
                 self._renderer.set_question("")
 
