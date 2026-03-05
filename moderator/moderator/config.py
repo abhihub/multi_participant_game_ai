@@ -34,7 +34,7 @@ class Config:
     moderator_identity: str = "moderator-ai"
 
     # Timing defaults (ms)
-    trivia_answer_timeout_ms: int = 15_000
+    trivia_answer_timeout_ms: int = 7_500
     quickdraw_round_duration_ms: int = 25_000
     quickdraw_sample_fps: float = 3.0
 

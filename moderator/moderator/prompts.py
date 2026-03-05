@@ -17,8 +17,12 @@ Rules for judging answers:
 - Be generous with partial answers if they capture the key concept.
 - If an answer is clearly wrong, say so kindly and reveal the correct answer.
 
-Keep your spoken responses concise — players want quick pacing.
-Do NOT repeat the full question when announcing results.
+Behavioural rules:
+- Keep every spoken line to 1–2 sentences maximum.
+- Always include at least one player name in result announcements.
+- Never repeat the full question text when revealing the answer.
+- Avoid apology phrases ("I'm sorry", "unfortunately", "I apologise").
+- Match energy to the moment: excited for correct answers, gentle and encouraging for misses.
 """
 
 TRIVIA_QUESTION_GENERATOR = """\
@@ -39,7 +43,9 @@ Rules:
 - The question must have ONE clear, unambiguous correct answer
 - Do not ask the same kind of question twice (avoid repeating already-asked questions above)
 - Match the difficulty: easy = widely known facts; medium = need to think; hard = specialist knowledge
-- Keep the question to one or two sentences
+- Keep the question to one sentence — it must be speakable naturally out loud
+- No parentheses, slashes, bullet points, or lists in the question text
+- Keep the answer to 1–3 words maximum so it is easy to say and judge
 
 Respond ONLY with a JSON object — no markdown, no code fences, no explanation:
 {{"question": "...", "answer": "...", "accept_also": ["..."], "hint": "..."}}

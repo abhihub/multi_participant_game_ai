@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import random
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -37,15 +39,29 @@ _WELCOME = [
     "Alright, trivia fans — welcome! I'm your host and we are starting right now!",
 ]
 
+_OPENING_PREFIX = [
+    "Alright, let's get this started — ",
+    "First question coming right up — ",
+    "Here's your opener — ",
+    "Kicking things off — ",
+]
+
+_ENDGAME_PREFIX = [
+    "Final stretch! ",
+    "Almost there — ",
+    "Last couple of questions! ",
+    "Home stretch, people — ",
+]
+
 _QUESTION_INTROS = [
-    "Alright, question {n}: {q} Shout out your answer!",
-    "Here we go — {q} Who's got this one?",
-    "Question {n}: {q} Let me hear it!",
-    "For question {n}: {q} What do you think?",
-    "Here's question {n} — {q} Go for it!",
-    "Ooh, this one's good — {q} Shout it out!",
-    "Question {n}: {q} Come on, I know you know this!",
-    "Up next — {q} Go ahead, shout your answer!",
+    "question {n}: {q} Shout out your answer!",
+    "{q} Who's got this one?",
+    "question {n}: {q} Let me hear it!",
+    "for question {n}: {q} What do you think?",
+    "here's question {n} — {q} Go for it!",
+    "ooh, this one's good — {q} Shout it out!",
+    "question {n}: {q} Come on, I know you know this!",
+    "{q} Go ahead, shout your answer!",
 ]
 
 _CORRECT = [
@@ -58,12 +74,19 @@ _CORRECT = [
     "Correct! Well played, {name} — {answer} it is!",
 ]
 
-_NOBODY_GOT_IT = [
-    "Nobody got it this time! The answer was {answer}.",
-    "Ooh, tough one! Nobody got it — it was {answer}. Don't worry, more to come!",
-    "No one got it — the correct answer was {answer}. Tricky, right?",
-    "That stumped everyone! The answer was {answer}.",
-    "Ooh so close but no cigar! It was {answer}. On to the next one!",
+_WRONG_TRIED = [
+    "Not quite, {name} — the answer was {answer}.",
+    "Nice try, {name} — but it was {answer}.",
+    "Good attempt, {name}! The answer was {answer}.",
+    "Almost, {name}! It was {answer} — you'll get the next one!",
+    "Not this time, {name}. The answer was {answer}.",
+]
+
+_WRONG_CLOSE = [
+    "Ooh, {name} was SO close! The answer was {answer}.",
+    "Just missed it, {name}! It was {answer}.",
+    "Right idea, {name} — the answer was {answer}!",
+    "So close, {name}! It was {answer}.",
 ]
 
 _NO_ANSWERS = [
@@ -72,16 +95,20 @@ _NO_ANSWERS = [
     "No takers on that one! It was {answer}. Next question!",
 ]
 
+_NUDGES = [
+    "Anyone? Take your time...",
+    "Going once... going twice...",
+    "Come on, someone must know this!",
+    "I'll give you a few more seconds...",
+    "Think carefully — it's in there somewhere!",
+]
+
 _GAME_END = [
     "And that's a wrap! What a game — thanks for playing, everyone!",
     "That's all the questions! Incredible effort from everyone today. Thanks for playing!",
     "And we're done! That was a fantastic game — thanks so much for playing!",
     "That's trivia night in the books! Thanks for playing — you were all amazing!",
 ]
-
-
-def _pick(options: list[str]) -> str:
-    return random.choice(options)
 
 
 @dataclass
@@ -154,6 +181,18 @@ class TriviaFlow:
         # Early-close machinery: correct answer triggers event before timeout
         self._early_close_event: asyncio.Event = asyncio.Event()
         self._judged_answers: dict[str, JudgedAnswer] = {}  # keyed by participant_identity
+        # Anti-repetition: track recently used phrases per category
+        self._phrase_history: dict[str, deque[str]] = {}
+
+    def _pick(self, category: str, options: list[str]) -> str:
+        """Pick a random phrase from *options*, avoiding recent repeats."""
+        history = self._phrase_history.setdefault(
+            category, deque(maxlen=max(1, len(options) // 2))
+        )
+        available = [o for o in options if o not in history] or options
+        chosen = random.choice(available)
+        history.append(chosen)
+        return chosen
 
     # -- public API ------------------------------------------------------- #
 
@@ -162,7 +201,7 @@ class TriviaFlow:
         self._running = True
         logger.info("trivia flow starting: session=%s rounds=%d", self._session_id, num_rounds)
 
-        await self._say(_pick(_WELCOME))
+        await self._say(self._pick("welcome", _WELCOME))
 
         prefetched: TriviaQuestion | None = None
         for round_idx in range(num_rounds):
@@ -179,10 +218,12 @@ class TriviaFlow:
                 break
 
             round_id = f"rnd_{round_idx}"
-            prefetched = await self._play_round(round_id, round_idx + 1, prefetched=prefetched)
+            prefetched = await self._play_round(
+                round_id, round_idx + 1, num_rounds=num_rounds, prefetched=prefetched
+            )
 
         if self._running:
-            await self._say(_pick(_GAME_END))
+            await self._say(self._pick("game_end", _GAME_END))
             self._running = False
 
         # Update HUD with final scores and winner banner
@@ -260,6 +301,7 @@ class TriviaFlow:
         self,
         round_id: str,
         round_number: int,
+        num_rounds: int = 10,
         prefetched: TriviaQuestion | None = None,
     ) -> TriviaQuestion | None:
         """Execute a single trivia round.
@@ -289,14 +331,24 @@ class TriviaFlow:
         except Exception:
             logger.warning("failed to set floor to moderator_only, continuing anyway")
 
-        # 3. Show question on HUD, then speak question + go-ahead as one utterance
-        #    (two separate _say calls create a noticeable robotic pause between them)
+        # 3. Show question on HUD, then speak with round-state-aware phrasing
         if self._renderer:
             self._renderer.set_question(question.question)
         question_asked_at_ms = int(time.time() * 1000)
-        await self._say(
-            _pick(_QUESTION_INTROS).format(n=round_number, q=question.question)
+        if round_number == 1:
+            prefix = self._pick("opening_prefix", _OPENING_PREFIX)
+        elif round_number >= num_rounds - 1:
+            prefix = self._pick("endgame_prefix", _ENDGAME_PREFIX)
+        else:
+            prefix = ""
+        intro = self._pick("question_intro", _QUESTION_INTROS).format(
+            n=round_number, q=question.question
         )
+        # Capitalise first letter after any prefix
+        if prefix:
+            await self._say(prefix + intro)
+        else:
+            await self._say(intro[0].upper() + intro[1:] if intro else intro)
 
         # 4. Broadcast trivia.question event
         await self._events.broadcast("trivia.question", {
@@ -323,15 +375,33 @@ class TriviaFlow:
         except Exception:
             logger.warning("failed to set floor to open, continuing anyway")
 
-        # 7. Wait for answers — exits early if a correct answer arrives
+        # 7. Wait for answers — exits early if a correct answer arrives.
+        #    A nudge fires at 65% of the timeout when nobody has answered yet.
+        answer_timeout = config.trivia_answer_timeout_ms / 1000.0
+
+        async def _nudge_if_silent() -> None:
+            await asyncio.sleep(answer_timeout * 0.65)
+            # Guard: skip nudge if there won't be enough open window after TTS finishes
+            remaining = answer_timeout - (answer_timeout * 0.65)
+            estimated_tts_s = 2.5
+            if remaining < estimated_tts_s + 2.0:
+                return
+            if not self._early_close_event.is_set() and not self._pending_answers:
+                await self._say(self._pick("nudge", _NUDGES))
+
+        nudge_task = asyncio.create_task(_nudge_if_silent())
         try:
             await asyncio.wait_for(
                 self._early_close_event.wait(),
-                timeout=config.trivia_answer_timeout_ms / 1000.0,
+                timeout=answer_timeout,
             )
             logger.info("answer window: early close triggered by correct answer")
         except asyncio.TimeoutError:
             logger.info("answer window: timeout elapsed")
+        finally:
+            nudge_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await nudge_task
 
         # 8. Close the floor (stops new speech from entering)
         try:
@@ -362,7 +432,7 @@ class TriviaFlow:
             prefetch_task = asyncio.create_task(self._generate_question("prefetch"))
 
         if not answers:
-            await self._say(_pick(_NO_ANSWERS).format(answer=question.answer))
+            await self._say(self._pick("no_answers", _NO_ANSWERS).format(answer=question.answer))
             if self._renderer:
                 self._renderer.set_question("")
             await self._events.broadcast("trivia.answer.detected", {
@@ -405,12 +475,32 @@ class TriviaFlow:
             except Exception:
                 logger.warning("failed to sync scores after round", exc_info=True)
 
-            # 11. Announce result
+            # 11. Announce result — vary by outcome and confidence
             if winner:
                 winner_display = winner_name_map.get(winner, winner)
-                await self._say(_pick(_CORRECT).format(name=winner_display, answer=question.answer))
+                await self._say(
+                    self._pick("correct", _CORRECT).format(name=winner_display, answer=question.answer)
+                )
             else:
-                await self._say(_pick(_NOBODY_GOT_IT).format(answer=question.answer))
+                # Find the wrong answer with the highest confidence (most interesting to react to)
+                best_wrong: tuple[PendingAnswer, JudgedAnswer] | None = None
+                for ans in answers:
+                    j = self._judged_answers.get(ans.participant_identity)
+                    if j and not j.is_correct:
+                        if best_wrong is None or j.confidence > best_wrong[1].confidence:
+                            best_wrong = (ans, j)
+
+                if best_wrong is None:
+                    # Fallback: use first answer, no confidence info
+                    first = answers[0]
+                    name = winner_name_map.get(first.participant_identity, first.participant_identity)
+                    await self._say(self._pick("wrong_tried", _WRONG_TRIED).format(name=name, answer=question.answer))
+                elif best_wrong[1].confidence >= 0.6:
+                    name = winner_name_map.get(best_wrong[0].participant_identity, best_wrong[0].participant_identity)
+                    await self._say(self._pick("wrong_close", _WRONG_CLOSE).format(name=name, answer=question.answer))
+                else:
+                    name = winner_name_map.get(best_wrong[0].participant_identity, best_wrong[0].participant_identity)
+                    await self._say(self._pick("wrong_tried", _WRONG_TRIED).format(name=name, answer=question.answer))
             if self._renderer:
                 self._renderer.set_question("")
 
@@ -576,7 +666,6 @@ class TriviaFlow:
                 "transcript": answer.transcript,
             })
 
-        self._judged_answers.clear()
         return winner
 
     # -- helpers ---------------------------------------------------------- #
