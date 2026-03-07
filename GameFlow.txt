@@ -1,0 +1,281 @@
+
+
+
+
+- agent.py: Configures AgentSession with STT (Deepgram), LLM (GPT-4.1-mini), TTS (Cartesia). The session-level STT→LLM→TTS pipeline IS active and CAN
+ fire auto-responses when participants speak — this is the root cause of the original bug.
+ - game_agent.py: Also creates a second separate Deepgram instance (self._answer_stt) for per-participant answer collection. Each participant gets their
+ own STT stream routed directly to receive_answer(), bypassing the session LLM entirely.
+ - trivia_flow._say(): Already emits moderator.speak.started/ended events, sets _is_speaking gate, calls interrupt(force=True) before say() (our fix).
+ - quickdraw_flow._say(): Does NOT emit events, does NOT set _is_speaking, does NOT call interrupt().
+ - Answer deduplication: First-answer-wins per participant per question. Grace window of 1.5s after timeout. Answers gated while _is_speaking=True.
+
+
+• Real Audio Emitters (AI Moderator voice)
+
+  1. AgentSession is configured with Cartesia TTS in agent.py:82 and agent.py:88.
+  2. Trivia speech is emitted only via await self._session.say(text) in trivia_flow.py:423.
+  3. QuickDraw speech is emitted only via await self._session.say(text) in quickdraw_flow.py:281.
+
+  All Call Sites That Trigger session.say()
+
+  1. Trivia intro in trivia_flow.py:93.
+  2. Trivia outro in trivia_flow.py:112.
+  3. Trivia question prompt in trivia_flow.py:202.
+  4. Trivia answer-window prompt in trivia_flow.py:224.
+  5. Trivia no-answer result in trivia_flow.py:250.
+  6. Trivia winner result in trivia_flow.py:289.
+  7. Trivia no-winner result in trivia_flow.py:291.
+  8. QuickDraw intro in quickdraw_flow.py:74.
+  9. QuickDraw outro in quickdraw_flow.py:89.
+  10. QuickDraw round prompt in quickdraw_flow.py:126.
+  11. QuickDraw winner announcement in quickdraw_flow.py:175.
+  12. QuickDraw timeout announcement in quickdraw_flow.py:182.
+
+  Where That Audio Is Played To Users
+
+  1. Remote mic tracks (including moderator voice) are rendered with <AudioTrack> in VideoGrid.tsx:38.
+  2. Source list for playback is useTracks([Track.Source.Microphone]) in VideoGrid.tsx:14, filtered only by myIdentity in VideoGrid.tsx:32.
+
+  Not Audio (but often confused as audio)
+
+  1. moderator.speak.started/ended events in Trivia are metadata/UI signals, not sound output: trivia_flow.py:412, trivia_flow.py:435.
+  2. Internal TTS API route creates jobs and emits events, but does not synthesize/play real audio in this code: internal-tts.ts:8, internal-tts.ts:23,
+     TtsStore.ts:8.
+  3. ApiClient.speak() exists but has no runtime callers in moderator flows: api_client.py:99.
+  4. Video HUD “speaking indicator” is visual only: video_renderer.py:228.
+
+  High-Probability Duplicate Speech Sources
+
+  1. Multiple moderator workers in same room would each run session.say() (double voice). Current duplicate guard checks for remote participant identity
+     "moderator-ai" in game_agent.py:60, which may not be a reliable LiveKit identity for the running agent.
+  2. Client will play every remote microphone track it sees in VideoGrid.tsx:32, so duplicate moderator participants/tracks means duplicate audible output
+     immediately.
+
+
+
+
+• Moderator Overview
+  moderator/ is a Python LiveKit Agent worker that joins game rooms, runs game logic, and emits UI/game events.
+
+  Start here:
+
+  1. Entry point: agent.py
+  2. Orchestrator: game_agent.py
+  3. Game loops: trivia_flow.py, quickdraw_flow.py
+  4. API bridge: api_client.py
+  5. DataChannel events: events.py
+  6. Video HUD track: video_renderer.py
+
+  Lifecycle (What Happens in Order)
+
+  1. entrypoint() waits until session status becomes running before connecting to the room (agent.py:29).
+  2. It starts AgentSession with Deepgram STT, OpenAI LLM, Cartesia TTS, Silero VAD (agent.py:82).
+  3. GameModerator.on_enter():
+      - prevents duplicate moderator instances (game_agent.py:59)
+      - attaches per-participant STT streams for audio tracks (game_agent.py:68)
+      - resolves session_id from room metadata (game_agent.py:358)
+      - calls internal attach API (game_agent.py:93)
+      - publishes a synthetic video “moderator HUD” track (game_agent.py:112)
+      - chooses trivia or quick_draw flow from snapshot (game_agent.py:124)
+  4. On exit it stops renderer, cancels STT/game tasks, detaches from API (game_agent.py:140).
+
+  Trivia Flow
+  In trivia_flow.py:
+
+  1. run() advances rounds via API (trivia_flow.py:99).
+  2. Each round:
+      - generate question via OpenAI JSON mode (trivia_flow.py:280)
+      - set floor to moderator_only (trivia_flow.py:170)
+      - speak question and broadcast trivia.question (trivia_flow.py:185)
+      - open floor for answers, wait timeout (trivia_flow.py:195)
+      - judge each transcript via LLM and submit decision (trivia_flow.py:315)
+  3. _say() emits moderator.speak.started/ended and gates STT during TTS (trivia_flow.py:386).
+
+  Quick Draw Flow
+  In quickdraw_flow.py:
+
+  1. Generates drawing prompt with LLM (quickdraw_flow.py:252).
+  2. Samples video frames from participants at configured FPS (quickdraw_flow.py:139).
+  3. Calls /internal/v1/vision/quickdraw-judge and submits winner decision on hit (quickdraw_flow.py:210).
+
+  Contract With Game Engine (TypeScript service)
+
+  1. Session creation pre-creates LiveKit room metadata with session_id so moderator can bind correctly (SessionStore.ts:72).
+  2. Moderator attach/detach/floor/advance-round endpoints live in internal-control.ts.
+  3. Moderator submits judged decisions to internal-decisions.ts, which update scores/winner/session end in SessionStore.ts:400.
+  4. Snapshot shape used by moderator comes from sessions.ts:73.
+
+  UI Tie-In
+  Client ModeratorTile renders the moderator’s video HUD track if present (ModeratorTile.tsx:39), and gameStore consumes score.updated, game.winner,
+  moderator.speak.*, etc. (gameStore.tsx:57).
+
+
+
+
+  TRIVIA FLOW (3 participants + AI Moderator)                                                                                                           
+                                                                                                                                                        
+  [Host creates session]                                                                                                                                  
+      |                                                                                                                                                 
+      v                                                                                                                                                   
+  [Game Engine creates SessionStore record]                                                                                                             
+      |
+      v
+  [Host + Player B + Player C join LiveKit room]
+      |
+      v
+  [Host clicks Start Game]
+      |
+      v
+  [Game status -> running]
+
+  ------------------ Moderator startup ------------------
+
+  [LiveKit dispatches AI Moderator worker]
+      |
+      v
+  [agent.py polls /snapshot until status == "running"]
+      |
+      v
+  [Moderator connects to LiveKit room (ctx.connect())]
+      |
+      v
+  [GameModerator.on_enter()]
+      |-- attach to Game Engine (/internal/.../attach)
+      |-- create EventBroadcaster (DataChannel)
+      |-- create + publish moderator HUD video track
+      |-- start per-participant STT streams
+      v
+  [_run_game_flow() spawns TriviaFlow.run()]
+
+  ------------------ Per-round loop ------------------
+
+  [advance-round API call]
+      |  (if action == "session_ended" → break)
+      v
+  [Generate trivia question (LLM)]
+      |  (uses pre-fetched question from previous round if available)
+      v
+  [Set floor = moderator_only  +  broadcast floor.changed]
+      |
+      v
+  [Show question on HUD]
+      |
+      v
+  [Moderator speaks question (TTS)]
+      |
+      v
+  [Broadcast trivia.question event]
+      |
+      v
+  [Set _current_question  +  Set floor = open  +  broadcast floor.changed]
+      |
+      v
+  [Answer window open (timeout = configurable, default 15s)]
+      |
+      |-- [Players answer by voice]
+      |       |
+      |       v
+      |   [STT transcript per participant → receive_answer()]
+      |       |
+      |       v
+      |   [_judge_early() spawned in background (LLM, temp=0)]
+      |       |
+      |       |-- if CORRECT → set early_close_event → window closes early
+      |       |-- if WRONG   → cache result in _judged_answers{}
+      |
+      |-- [Nudge TTS at 65% of timeout if no answers yet]
+      |
+      v
+  [Answer window closes (timeout OR early close)]
+      |
+      v
+  [Set floor = moderator_only  +  broadcast floor.changed]
+      |
+      v
+  [Grace window: asyncio.sleep(1.5s) — lets in-flight STT finals arrive]
+      |
+      v
+  [Close answer gate (_current_question = None)]
+      |
+      v
+  [_judge_answers() — for each collected answer:]
+      |-- use cached judgment from _judged_answers{} if available
+      |-- else call LLM judge now (temp=0)
+      |-- submit decision → /internal/v1/decisions/trivia-answer
+      |       |
+      |       v
+      |   [Game Engine / SessionStore]
+      |       |-- updates score
+      |       |-- emits trivia.winner (if correct)
+      |       |-- emits game.winner / session.ended (if win condition met)
+      |
+      |-- broadcast trivia.answer.detected (per participant)
+      v
+  [Fetch updated snapshot from Game Engine]
+      |
+      v
+  [Broadcast score.updated per participant  +  Update HUD scores]
+      |
+      v
+  [Moderator announces result (TTS)]
+      |-- CORRECT  → "Yes! {name} got it! The answer is {answer}!"
+      |-- WRONG    → reacts to highest-confidence wrong answer
+      |              ("So close!" if confidence ≥ 0.6, else "Nice try!")
+      |-- NO ANSWER → "Nobody answered! The answer was {answer}."
+      |
+      v
+  [Pre-fetch next question (LLM) — runs concurrently during announcement TTS]
+      |
+      v
+  [Next round OR game ends]
+
+  ------------------ End ------------------
+
+  [Round limit reached OR advance-round returns session_ended]
+      |
+      v
+  [Moderator speaks game-end line (TTS)]
+      |
+      v
+  [HUD shows final scores + winner banner + confetti]
+      |
+      v
+  [GameModerator.on_exit()]
+      |-- stop VideoRenderer
+      |-- cancel per-participant STT tasks
+      |-- stop TriviaFlow
+      |-- detach from Game Engine (/internal/.../detach)
+      |-- close API client
+      v
+  [Game Engine broadcasts session.ended + final scores]
+
+
+
+Next: Explain to me what happens if mutiple participants answer the trivia question correctly.                                                          
+⏺ Here's exactly what happens, tracing through the code:                                                                                                  
+                                                                                                                                                        
+  1. First correct answer closes the window early                                                                                                         
+  _judge_early() runs in the background as each answer arrives. The first participant whose answer is judged correct sets _early_close_event, which breaks
+   the asyncio.wait_for at line 389 — the window closes immediately rather than waiting out the remaining time.                                           
+                                                                                                                                                        
+  2. Later answers may or may not make it in
+  Any answers that arrived before the window closed (already in _pending_answers) are kept. Answers that arrive after _early_close_event fires but before
+  _current_question = None (during the 1.5s grace window) also get collected. So a second correct answer can slip in.
+
+  3. All collected answers are judged and submitted
+  _judge_answers() iterates every answer in answers[] and calls submit_trivia_answer() for each — including any second/third correct ones. The Game Engine
+   receives all decisions.
+
+  4. Only the first correct answer wins
+  if is_correct and winner is None:
+      winner = answer.participant_identity
+  winner is set once and never overwritten. The second correct answerer is submitted as correct to the Game Engine but gets no announcement and presumably
+   no point (depends on Game Engine logic).
+
+  5. Only one winner is announced
+  The moderator says "Yes! {name} got it!" for a single winner. The second correct answer is silently ignored from the TTS perspective.
+
+  ---
+  The gap: The Game Engine receives is_correct=True for potentially two participants in the same round. Whether it awards points to both or just the first
+   is determined by submit_trivia_answer handler on the API side — worth checking if that's the intended behavior.

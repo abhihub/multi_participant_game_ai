@@ -129,7 +129,7 @@ export default function ConversationLog({ entries }: { entries: ConversationEntr
                   gap: 6,
                 }}
               >
-                <span style={{ fontSize: 11, fontWeight: 700, color: "#9ca3af" }}>
+                <span style={{ fontSize: 9, fontWeight: 700, color: "#9ca3af" }}>
                   {entry.role === "moderator" ? "🤖" : "👤"} {entry.senderName}
                 </span>
                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -159,7 +159,7 @@ export default function ConversationLog({ entries }: { entries: ConversationEntr
                 </div>
               </div>
               {/* Message text */}
-              <div style={{ fontSize: 13, color: "#d1d5db", marginTop: 1 }}>
+              <div style={{ fontSize: 11, color: "#d1d5db", marginTop: 1 }}>
                 &ldquo;{entry.text}&rdquo;
               </div>
             </div>
