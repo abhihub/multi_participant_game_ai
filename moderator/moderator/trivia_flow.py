@@ -364,7 +364,10 @@ class TriviaFlow:
         self._early_close_event.clear()
         self._current_question = question
 
-        # 6. Open the floor AFTER TTS finishes so _is_speaking is already False
+        # 6. Open the floor AFTER TTS finishes so _is_speaking is already False.
+        #    Show countdown animation on HUD right before the window opens.
+        if self._renderer:
+            await self._renderer.show_countdown()
         try:
             await self._api.set_floor(self._session_id, "open", reason="answer window")
             await self._events.broadcast("floor.changed", {
@@ -478,6 +481,8 @@ class TriviaFlow:
             # 11. Announce result — vary by outcome and confidence
             if winner:
                 winner_display = winner_name_map.get(winner, winner)
+                if self._renderer:
+                    self._renderer.show_correct(winner_display)
                 await self._say(
                     self._pick("correct", _CORRECT).format(name=winner_display, answer=question.answer)
                 )

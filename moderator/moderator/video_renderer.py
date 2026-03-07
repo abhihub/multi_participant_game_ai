@@ -11,6 +11,7 @@ import asyncio
 import logging
 import math
 import random
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -74,6 +75,14 @@ class VideoRenderer:
         self._particles: list[_Particle] = []
         self._winner_alpha: float = 0.0               # fade-in 0→1
 
+        # Countdown animation state
+        self._countdown_start: float | None = None
+
+        # Correct answer celebration state
+        self._correct_name: str | None = None
+        self._correct_expires: float = 0.0
+        self._correct_style: int = 0
+
         self._running = False
         self._task: asyncio.Task[None] | None = None
 
@@ -115,6 +124,18 @@ class VideoRenderer:
         self._winner_name = display_name
         self._winner_alpha = 0.0
 
+    async def show_countdown(self) -> None:
+        """Display Ready→Set→GO over 1.5s, then return."""
+        self._countdown_start = time.monotonic()
+        await asyncio.sleep(1.5)
+
+    def show_correct(self, display_name: str) -> None:
+        """Flash a celebration overlay for ~2s and trigger confetti."""
+        self._correct_name = display_name
+        self._correct_expires = time.monotonic() + 2.0
+        self._correct_style = random.randint(0, 2)
+        self.trigger_confetti()
+
     # -- render loop ------------------------------------------------------- #
 
     async def _render_loop(self) -> None:
@@ -153,7 +174,70 @@ class VideoRenderer:
         if self._winner_name:
             self._draw_winner_banner(draw)
 
+        img = self._draw_countdown(img)
+        img = self._draw_correct_celebration(img)
+
         return img
+
+    def _draw_countdown(self, img: Image.Image) -> Image.Image:
+        if self._countdown_start is None:
+            return img
+        elapsed = time.monotonic() - self._countdown_start
+        if elapsed < 0.5:
+            label, color = "Ready...", (255, 220, 50, 230)
+        elif elapsed < 1.0:
+            label, color = "Set...", (255, 140, 0, 230)
+        elif elapsed < 1.5:
+            label, color = "GO!", (80, 255, 120, 230)
+        else:
+            self._countdown_start = None
+            return img
+
+        font = _font(52)
+        draw = ImageDraw.Draw(img, "RGBA")
+        bbox = draw.textbbox((0, 0), label, font=font)
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+        cx, cy = WIDTH // 2, HEIGHT // 2
+        pad = 18
+        overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        odraw = ImageDraw.Draw(overlay)
+        odraw.rounded_rectangle(
+            [cx - tw // 2 - pad, cy - th // 2 - pad, cx + tw // 2 + pad, cy + th // 2 + pad],
+            radius=16, fill=(0, 0, 0, 180),
+        )
+        odraw.text((cx, cy), label, font=font, fill=color, anchor="mm")
+        return Image.alpha_composite(img, overlay)
+
+    def _draw_correct_celebration(self, img: Image.Image) -> Image.Image:
+        if not self._correct_name:
+            return img
+        remaining = self._correct_expires - time.monotonic()
+        if remaining <= 0:
+            self._correct_name = None
+            return img
+
+        alpha = min(230, int(230 * min(1.0, remaining / 0.3)))
+        headlines = [
+            ("✓  CORRECT!", (80, 255, 120, alpha)),
+            ("🎉  NICE ONE!  🎉", (255, 210, 50, alpha)),
+            ("⭐  BRILLIANT!  ⭐", (130, 180, 255, alpha)),
+        ]
+        headline, color = headlines[self._correct_style]
+
+        overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        odraw = ImageDraw.Draw(overlay)
+        cy = HEIGHT // 2 - 20
+        odraw.rounded_rectangle(
+            [60, cy - 44, WIDTH - 60, cy + 54],
+            radius=20, fill=(0, 0, 0, min(180, alpha)),
+        )
+        odraw.text((WIDTH // 2, cy), headline, font=_font(36), fill=color, anchor="mm")
+        odraw.text(
+            (WIDTH // 2, cy + 38), self._correct_name, font=_font(18),
+            fill=(220, 220, 220, alpha), anchor="mm",
+        )
+        return Image.alpha_composite(img, overlay)
 
     def _draw_background(self, draw: ImageDraw.ImageDraw) -> None:
         for y in range(HEIGHT):
