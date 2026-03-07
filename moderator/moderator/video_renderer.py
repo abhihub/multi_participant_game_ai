@@ -46,6 +46,17 @@ CONFETTI_COLORS = [
     (255, 160, 60), (60, 220, 200),
 ]
 
+# Character panel — right 160 px column
+CHAR_PANEL_X = 480
+
+# Anime character colour palette
+CHAR_HAIR   = (160, 90, 220)   # purple
+CHAR_SKIN   = (255, 218, 185)  # peach
+CHAR_EYE    = (80, 120, 255)   # blue iris
+CHAR_LASH   = (30, 20, 50)     # near-black lash
+CHAR_LIP    = (220, 100, 120)  # pink lip
+CHAR_OUTFIT = (70, 50, 130)    # dark purple
+
 
 @dataclass
 class _Particle:
@@ -167,6 +178,8 @@ class VideoRenderer:
 
         self._draw_background(draw)
         self._draw_header(draw)
+        img = self._draw_character_panel(img)
+        draw = ImageDraw.Draw(img, "RGBA")
         self._draw_leaderboard(draw)
         self._draw_question_banner(draw, img)
         self._draw_speaking_indicator(draw)
@@ -254,9 +267,10 @@ class VideoRenderer:
                   fill=(*TEXT_ACCENT, 255), anchor="mm")
 
     def _draw_leaderboard(self, draw: ImageDraw.ImageDraw) -> None:
+        right = CHAR_PANEL_X
         if not self._scores:
             font = _font(14)
-            draw.text((WIDTH // 2, HEIGHT // 2), "Waiting for players…",
+            draw.text((right // 2, HEIGHT // 2), "Waiting for players…",
                       font=font, fill=(*TEXT_SECONDARY, 200), anchor="mm")
             return
 
@@ -271,7 +285,7 @@ class VideoRenderer:
             y0 = top + i * row_h
             y1 = y0 + row_h - 2
             bg = SCORE_HIGHLIGHT if i == 0 else (SCORE_ROW_EVEN if i % 2 == 0 else SCORE_ROW_ODD)
-            draw.rectangle([pad_x, y0, WIDTH - pad_x, y1], fill=(*bg, 255))
+            draw.rectangle([pad_x, y0, right - pad_x, y1], fill=(*bg, 255))
 
             prefix = medal[i] if i < 3 else f"{i + 1}."
             label = f"{prefix}  {name}"
@@ -279,8 +293,109 @@ class VideoRenderer:
                       font=font_name, fill=(*TEXT_PRIMARY, 255), anchor="lm")
 
             score_text = str(score)
-            draw.text((WIDTH - pad_x - 10, y0 + row_h // 2), score_text,
+            draw.text((right - pad_x - 10, y0 + row_h // 2), score_text,
                       font=font_score, fill=(*TEXT_ACCENT, 255), anchor="rm")
+
+    def _draw_character_panel(self, img: Image.Image) -> Image.Image:
+        draw = ImageDraw.Draw(img, "RGBA")
+
+        # Vertical separator
+        draw.line(
+            [(CHAR_PANEL_X, 44), (CHAR_PANEL_X, HEIGHT - 56)],
+            fill=(100, 80, 160, 180), width=2,
+        )
+
+        t = time.monotonic()
+        celebrating = t < self._correct_expires
+        bob_y = int(math.sin(t * 6.0) * 8) if celebrating else int(math.sin(t * 1.8) * 4)
+        cx = (CHAR_PANEL_X + WIDTH) // 2   # 560
+        cy = 44 + (HEIGHT - 56 - 44) // 2 + bob_y  # ~234 + bob
+
+        self._draw_anime_face(draw, cx, cy, celebrating)
+
+        # Blush — semi-transparent via alpha_composite
+        overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        odraw = ImageDraw.Draw(overlay)
+        odraw.ellipse([cx - 36, cy + 2, cx - 20, cy + 12], fill=(255, 140, 140, 100))
+        odraw.ellipse([cx + 20, cy + 2, cx + 36, cy + 12], fill=(255, 140, 140, 100))
+        return Image.alpha_composite(img, overlay)
+
+    def _draw_anime_face(self, draw: ImageDraw.ImageDraw, cx: int, cy: int, celebrating: bool) -> None:
+        t = time.monotonic()
+
+        # --- Hair mass (behind face) ---
+        draw.ellipse([cx - 42, cy - 75, cx + 42, cy - 22], fill=(*CHAR_HAIR, 255))
+
+        # Side hair strands
+        draw.ellipse([cx - 54, cy - 55, cx - 28, cy + 10], fill=(*CHAR_HAIR, 255))
+        draw.ellipse([cx + 28, cy - 55, cx + 54, cy + 10], fill=(*CHAR_HAIR, 255))
+
+        # Ahoge spike (narrow upward triangle)
+        draw.polygon(
+            [(cx, cy - 115), (cx - 6, cy - 80), (cx + 6, cy - 80)],
+            fill=(*CHAR_HAIR, 255),
+        )
+
+        # Ears
+        draw.ellipse([cx - 42, cy - 15, cx - 32, cy + 5], fill=(*CHAR_SKIN, 255))
+        draw.ellipse([cx + 32, cy - 15, cx + 42, cy + 5], fill=(*CHAR_SKIN, 255))
+
+        # Face
+        draw.ellipse([cx - 36, cy - 45, cx + 36, cy + 35], fill=(*CHAR_SKIN, 255))
+
+        # Front bangs (3 overlapping ellipses over top of face)
+        draw.ellipse([cx - 38, cy - 55, cx - 10, cy - 28], fill=(*CHAR_HAIR, 255))
+        draw.ellipse([cx - 18, cy - 60, cx + 18, cy - 30], fill=(*CHAR_HAIR, 255))
+        draw.ellipse([cx + 10, cy - 55, cx + 38, cy - 28], fill=(*CHAR_HAIR, 255))
+
+        if celebrating:
+            # Happy ^^ eyes — two arc lines
+            draw.arc([cx - 28, cy - 28, cx - 10, cy - 14], start=200, end=340, fill=(*CHAR_LASH, 255), width=3)
+            draw.arc([cx + 10, cy - 28, cx + 28, cy - 14], start=200, end=340, fill=(*CHAR_LASH, 255), width=3)
+
+            # Sparkle lines around eyes
+            for dx, ey in [(cx - 19, cy - 30), (cx + 19, cy - 30)]:
+                draw.line([(dx, ey - 6), (dx, ey - 10)], fill=(*TEXT_ACCENT, 220), width=2)
+                draw.line([(dx - 5, ey - 3), (dx - 8, ey - 5)], fill=(*TEXT_ACCENT, 180), width=1)
+                draw.line([(dx + 5, ey - 3), (dx + 8, ey - 5)], fill=(*TEXT_ACCENT, 180), width=1)
+        else:
+            # Normal open eyes — white → iris → pupil → highlight
+            for ex in [cx - 19, cx + 19]:
+                draw.ellipse([ex - 9, cy - 28, ex + 9, cy - 12], fill=(255, 255, 255, 255))
+                draw.ellipse([ex - 6, cy - 26, ex + 6, cy - 14], fill=(*CHAR_EYE, 255))
+                draw.ellipse([ex - 3, cy - 24, ex + 3, cy - 16], fill=(10, 10, 30, 255))
+                draw.ellipse([ex + 2, cy - 24, ex + 5, cy - 21], fill=(255, 255, 255, 220))
+                # Lash arc over eye
+                draw.arc([ex - 10, cy - 30, ex + 10, cy - 14], start=200, end=340, fill=(*CHAR_LASH, 255), width=2)
+
+        # Nose — single dot
+        draw.ellipse([cx - 2, cy + 10, cx + 2, cy + 14], fill=(220, 170, 140, 255))
+
+        # Mouth
+        if celebrating:
+            # Wide happy arc + filled inner ellipse
+            draw.arc([cx - 18, cy + 14, cx + 18, cy + 28], start=0, end=180, fill=(*CHAR_LIP, 255), width=3)
+            draw.ellipse([cx - 12, cy + 16, cx + 12, cy + 26], fill=(180, 60, 80, 200))
+        elif self._speaking:
+            mouth_h = int(abs(math.sin(t * 8)) * 10 + 3)
+            draw.ellipse([cx - 10, cy + 16, cx + 10, cy + 16 + mouth_h], fill=(*CHAR_LIP, 255))
+        else:
+            # Gentle idle smile
+            draw.arc([cx - 14, cy + 14, cx + 14, cy + 26], start=0, end=180, fill=(*CHAR_LIP, 255), width=2)
+
+        # Neck
+        draw.rectangle([cx - 10, cy + 34, cx + 10, cy + 50], fill=(*CHAR_SKIN, 255))
+
+        # Body / outfit (trapezoid)
+        draw.polygon(
+            [(cx - 30, cy + 50), (cx + 30, cy + 50), (cx + 42, cy + 95), (cx - 42, cy + 95)],
+            fill=(*CHAR_OUTFIT, 255),
+        )
+        # Light collar
+        draw.polygon(
+            [(cx - 10, cy + 50), (cx + 10, cy + 50), (cx + 16, cy + 65), (cx - 16, cy + 65)],
+            fill=(200, 180, 240, 220),
+        )
 
     def _draw_question_banner(self, draw: ImageDraw.ImageDraw, img: Image.Image) -> None:
         if not self._question:
