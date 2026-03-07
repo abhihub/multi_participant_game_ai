@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 load_dotenv(".env.local")
 
 from livekit.agents import AgentSession, JobContext, RoomInputOptions, WorkerOptions, cli  # noqa: E402
-from livekit.plugins import cartesia, openai  # noqa: E402
+from livekit.plugins import openai  # noqa: E402
 
 from moderator.api_client import ApiClient  # noqa: E402
 from moderator.game_agent import GameModerator  # noqa: E402
@@ -84,7 +84,6 @@ async def entrypoint(ctx: JobContext) -> None:
     # can produce overlapping/interrupting moderator speech.
     session = AgentSession(
         llm=openai.LLM(model="gpt-4.1-mini"),
-        tts=cartesia.TTS(),
     )
 
     agent = GameModerator(ctx=ctx)

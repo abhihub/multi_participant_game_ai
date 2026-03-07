@@ -14,6 +14,7 @@ from livekit.plugins import deepgram as _deepgram_plugin
 from livekit.plugins import noise_cancellation as _nc_plugin
 
 from .api_client import ApiClient
+from .audio_renderer import AudioRenderer
 from .config import config
 from .events import EventBroadcaster
 from .prompts import TRIVIA_MODERATOR, QUICKDRAW_MODERATOR
@@ -46,6 +47,7 @@ class GameModerator(Agent):
         self._trivia_flow: TriviaFlow | None = None
         self._quickdraw_flow: QuickDrawFlow | None = None
         self._renderer: VideoRenderer | None = None
+        self._audio: AudioRenderer | None = None
         self._answer_stt = _deepgram_plugin.STT(
             model="nova-3",
             language="en",
@@ -132,6 +134,17 @@ class GameModerator(Agent):
         except Exception:
             logger.warning("failed to publish video HUD track", exc_info=True)
 
+        # Create and publish the direct audio track (bypasses AgentSession TTS)
+        self._audio = AudioRenderer()
+        try:
+            await self._ctx.room.local_participant.publish_track(
+                self._audio.track,
+                rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE),
+            )
+            logger.info("audio track published")
+        except Exception:
+            logger.warning("failed to publish audio track", exc_info=True)
+
         # Get session snapshot to know game type + config
         try:
             snapshot = await self._api.get_snapshot(session_id)
@@ -153,6 +166,10 @@ class GameModerator(Agent):
         # Stop video renderer first
         if self._renderer:
             await self._renderer.stop()
+
+        # Close audio renderer TTS resources
+        if self._audio:
+            await self._audio.aclose()
 
         # Cancel per-participant STT tasks
         for task in self._stt_tasks.values():
@@ -314,9 +331,8 @@ class GameModerator(Agent):
         if not self._session_id or not self._events:
             return
 
-        session = self.session
-        if session is None:
-            logger.error("no agent session available")
+        if self._audio is None:
+            logger.error("audio renderer not initialised")
             return
 
         # Wait for admin to click "Start Game" (session transitions to 'running')
@@ -386,7 +402,7 @@ class GameModerator(Agent):
         try:
             if self._game_type == "quick_draw":
                 self._quickdraw_flow = QuickDrawFlow(
-                    session=session,
+                    audio=self._audio,
                     room=self._ctx.room,
                     api=self._api,
                     events=self._events,
@@ -398,7 +414,7 @@ class GameModerator(Agent):
                 await self._quickdraw_flow.run()
             else:
                 self._trivia_flow = TriviaFlow(
-                    session=session,
+                    audio=self._audio,
                     api=self._api,
                     events=self._events,
                     session_id=self._session_id,

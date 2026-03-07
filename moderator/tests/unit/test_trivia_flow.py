@@ -29,7 +29,7 @@ def _make_llm_chat_mock(json_text: str):
     return mock_llm
 
 
-def _make_flow(mock_agent_session, llm_response: str | None = None):
+def _make_flow(mock_audio, llm_response: str | None = None):
     """Build a TriviaFlow with mocked dependencies."""
     api = MagicMock()
     api.set_floor = AsyncMock(return_value={"ok": True})
@@ -41,11 +41,8 @@ def _make_flow(mock_agent_session, llm_response: str | None = None):
     mock_room.local_participant.publish_data = AsyncMock()
     events = EventBroadcaster(mock_room, TEST_SESSION_ID)
 
-    if llm_response is not None:
-        mock_agent_session.llm = _make_llm_chat_mock(llm_response)
-
     flow = TriviaFlow(
-        session=mock_agent_session,
+        audio=mock_audio,
         api=api,
         events=events,
         session_id=TEST_SESSION_ID,
@@ -55,8 +52,8 @@ def _make_flow(mock_agent_session, llm_response: str | None = None):
 
 # ── receive_answer ───────────────────────────────────────────────────────────
 
-async def test_receive_answer_collects_when_question_active(mock_agent_session):
-    flow, api, _ = _make_flow(mock_agent_session)
+async def test_receive_answer_collects_when_question_active(mock_audio):
+    flow, api, _ = _make_flow(mock_audio)
     flow._current_question = TriviaQuestion(
         question_id="q_1", question="Capital of France?", answer="Paris"
     )
@@ -68,8 +65,8 @@ async def test_receive_answer_collects_when_question_active(mock_agent_session):
     assert flow._pending_answers[0].transcript == "paris"
 
 
-async def test_receive_answer_ignores_when_no_question(mock_agent_session):
-    flow, api, _ = _make_flow(mock_agent_session)
+async def test_receive_answer_ignores_when_no_question(mock_audio):
+    flow, api, _ = _make_flow(mock_audio)
     assert flow._current_question is None
 
     flow.receive_answer("player-1", "paris")
@@ -79,14 +76,14 @@ async def test_receive_answer_ignores_when_no_question(mock_agent_session):
 
 # ── generate_question ────────────────────────────────────────────────────────
 
-async def test_generate_question_parses_llm_json(mock_agent_session):
+async def test_generate_question_parses_llm_json(mock_audio):
     llm_json = json.dumps({
         "question": "What is the largest planet?",
         "answer": "Jupiter",
         "accept_also": ["jupiter"],
         "hint": "It's a gas giant.",
     })
-    flow, _, _ = _make_flow(mock_agent_session, llm_response=llm_json)
+    flow, _, _ = _make_flow(mock_audio, llm_response=llm_json)
 
     q = await flow._generate_question("rnd_0")
 
@@ -97,8 +94,8 @@ async def test_generate_question_parses_llm_json(mock_agent_session):
     assert q.question_id == "q_1"
 
 
-async def test_generate_question_fallback_on_bad_json(mock_agent_session):
-    flow, _, _ = _make_flow(mock_agent_session, llm_response="not json at all {{{")
+async def test_generate_question_fallback_on_bad_json(mock_audio):
+    flow, _, _ = _make_flow(mock_audio, llm_response="not json at all {{{")
 
     q = await flow._generate_question("rnd_0")
 
@@ -108,9 +105,9 @@ async def test_generate_question_fallback_on_bad_json(mock_agent_session):
 
 # ── judge_answers ────────────────────────────────────────────────────────────
 
-async def test_judge_answers_correct(mock_agent_session):
+async def test_judge_answers_correct(mock_audio):
     llm_json = json.dumps({"is_correct": True, "confidence": 0.95, "rationale": "exact match"})
-    flow, api, _ = _make_flow(mock_agent_session, llm_response=llm_json)
+    flow, api, _ = _make_flow(mock_audio, llm_response=llm_json)
 
     question = TriviaQuestion(question_id="q_1", question="Capital of France?", answer="Paris")
     answers = [PendingAnswer(participant_identity="player-1", transcript="paris", received_at_ms=1000)]
@@ -123,9 +120,9 @@ async def test_judge_answers_correct(mock_agent_session):
     assert call_kwargs["is_correct"] is True
 
 
-async def test_judge_answers_incorrect(mock_agent_session):
+async def test_judge_answers_incorrect(mock_audio):
     llm_json = json.dumps({"is_correct": False, "confidence": 0.9, "rationale": "wrong"})
-    flow, api, _ = _make_flow(mock_agent_session, llm_response=llm_json)
+    flow, api, _ = _make_flow(mock_audio, llm_response=llm_json)
 
     question = TriviaQuestion(question_id="q_1", question="Capital of France?", answer="Paris")
     answers = [PendingAnswer(participant_identity="player-1", transcript="london", received_at_ms=1000)]
@@ -135,8 +132,8 @@ async def test_judge_answers_incorrect(mock_agent_session):
     assert winner is None
 
 
-async def test_judge_answers_bad_json(mock_agent_session):
-    flow, api, _ = _make_flow(mock_agent_session, llm_response="garbage {{")
+async def test_judge_answers_bad_json(mock_audio):
+    flow, api, _ = _make_flow(mock_audio, llm_response="garbage {{")
 
     question = TriviaQuestion(question_id="q_1", question="Capital of France?", answer="Paris")
     answers = [PendingAnswer(participant_identity="player-1", transcript="paris", received_at_ms=1000)]
@@ -152,9 +149,9 @@ async def test_judge_answers_bad_json(mock_agent_session):
 
 # ── play_round floor sequence ───────────────────────────────────────────────
 
-async def test_play_round_floor_sequence(mock_agent_session):
+async def test_play_round_floor_sequence(mock_audio):
     llm_json = json.dumps({"question": "Q?", "answer": "A"})
-    flow, api, _ = _make_flow(mock_agent_session, llm_response=llm_json)
+    flow, api, _ = _make_flow(mock_audio, llm_response=llm_json)
 
     with patch("moderator.trivia_flow.asyncio.sleep", new_callable=AsyncMock):
         await flow._play_round("rnd_0", 1)
@@ -169,8 +166,8 @@ async def test_play_round_floor_sequence(mock_agent_session):
 
 # ── run / stop ───────────────────────────────────────────────────────────────
 
-async def test_run_stops_on_session_ended(mock_agent_session):
-    flow, api, _ = _make_flow(mock_agent_session, llm_response='{"question":"Q","answer":"A"}')
+async def test_run_stops_on_session_ended(mock_audio):
+    flow, api, _ = _make_flow(mock_audio, llm_response='{"question":"Q","answer":"A"}')
     api.advance_round = AsyncMock(return_value={"action": "session_ended"})
 
     with patch("moderator.trivia_flow.asyncio.sleep", new_callable=AsyncMock):
@@ -181,8 +178,8 @@ async def test_run_stops_on_session_ended(mock_agent_session):
     assert not flow._running
 
 
-async def test_stop_sets_running_false(mock_agent_session):
-    flow, _, _ = _make_flow(mock_agent_session)
+async def test_stop_sets_running_false(mock_audio):
+    flow, _, _ = _make_flow(mock_audio)
     flow._running = True
 
     flow.stop()

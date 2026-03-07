@@ -13,10 +13,10 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from livekit.agents import AgentSession
 from openai import AsyncOpenAI
 
 from .api_client import ApiClient
+from .audio_renderer import AudioRenderer
 from .config import config
 from .events import EventBroadcaster
 from .prompts import TRIVIA_QUESTION_GENERATOR, TRIVIA_ANSWER_JUDGE
@@ -156,7 +156,7 @@ class TriviaFlow:
 
     def __init__(
         self,
-        session: AgentSession,
+        audio: AudioRenderer,
         api: ApiClient,
         events: EventBroadcaster,
         session_id: str,
@@ -165,7 +165,7 @@ class TriviaFlow:
         renderer: VideoRenderer | None = None,
         rebuild_stt: Callable[[list[str]], Awaitable[None]] | None = None,
     ) -> None:
-        self._session = session
+        self._audio = audio
         self._api = api
         self._events = events
         self._session_id = session_id
@@ -698,24 +698,14 @@ class TriviaFlow:
                 self._renderer.set_speaking(True)
             try:
                 logger.info("TTS say: %r", text)
-                last_err: Exception | None = None
-                for attempt in range(2):
-                    try:
-                        await self._session.say(text)
-                        # Trailing buffer: audio playback + STT/VAD lag continue ~500ms
-                        # after the coroutine returns. Keep the gate up a bit longer.
-                        await asyncio.sleep(0.6)
-                        logger.info("TTS done")
-                        last_err = None
-                        break
-                    except RuntimeError as exc:
-                        last_err = exc
-                        if attempt == 0:
-                            logger.warning("TTS interrupted, retrying once: %s", exc)
-                            await asyncio.sleep(0.2)
-                        else:
-                            logger.warning("TTS failed after retry: %s", exc)
-                if last_err is not None:
+                try:
+                    await self._audio.say(text)
+                    # Trailing buffer: ensure audio playback has fully propagated
+                    # before releasing the speaking gate.
+                    await asyncio.sleep(0.6)
+                    logger.info("TTS done")
+                except Exception as exc:
+                    logger.warning("TTS say() failed: %s", exc)
                     end_status = "failed"
                     return
             finally:

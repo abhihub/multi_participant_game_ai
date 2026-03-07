@@ -51,6 +51,13 @@ def mock_agent_session():
 
 
 @pytest.fixture
+def mock_audio():
+    audio = MagicMock()
+    audio.say = AsyncMock()
+    return audio
+
+
+@pytest.fixture
 def mock_rtc_session(mock_room):
     ctx = MagicMock()
     ctx.room = mock_room

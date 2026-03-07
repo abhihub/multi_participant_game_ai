@@ -10,15 +10,18 @@ import time
 from dataclasses import dataclass
 
 from livekit import rtc
-from livekit.agents import AgentSession
+from openai import AsyncOpenAI
 
 from .api_client import ApiClient
+from .audio_renderer import AudioRenderer
 from .config import config
 from .events import EventBroadcaster
 from .prompts import QUICKDRAW_PROMPT_GENERATOR
 from .video_renderer import VideoRenderer
 
 logger = logging.getLogger(__name__)
+
+_openai = AsyncOpenAI()
 
 
 @dataclass
@@ -43,7 +46,7 @@ class QuickDrawFlow:
 
     def __init__(
         self,
-        session: AgentSession,
+        audio: AudioRenderer,
         room: rtc.Room,
         api: ApiClient,
         events: EventBroadcaster,
@@ -52,7 +55,7 @@ class QuickDrawFlow:
         difficulty: str = "medium",
         renderer: VideoRenderer | None = None,
     ) -> None:
-        self._session = session
+        self._audio = audio
         self._room = room
         self._api = api
         self._events = events
@@ -278,9 +281,9 @@ class QuickDrawFlow:
         try:
             logger.info("TTS say: %r", text)
             try:
-                await self._session.say(text)
-            except RuntimeError as exc:
-                logger.warning("TTS say() failed (session may be closing): %s", exc)
+                await self._audio.say(text)
+            except Exception as exc:
+                logger.warning("TTS say() failed: %s", exc)
                 return
             logger.info("TTS done")
         finally:
@@ -288,19 +291,9 @@ class QuickDrawFlow:
                 self._renderer.set_speaking(False)
 
     async def _llm_generate(self, prompt: str) -> str:
-        llm = self._session.llm
-        if llm is None:
-            return "{}"
-
-        response_parts: list[str] = []
-        async for chunk in llm.chat(
-            chat_ctx=[
-                {"role": "user", "content": prompt},
-            ],
-        ):
-            if hasattr(chunk, "text") and chunk.text:
-                response_parts.append(chunk.text)
-            elif hasattr(chunk, "delta") and chunk.delta:
-                response_parts.append(chunk.delta)
-
-        return "".join(response_parts)
+        response = await _openai.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+        )
+        return response.choices[0].message.content or "{}"
