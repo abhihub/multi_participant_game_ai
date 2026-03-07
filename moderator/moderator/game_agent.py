@@ -11,6 +11,7 @@ from typing import Any
 from livekit import rtc
 from livekit.agents import Agent, AgentSession, JobContext
 from livekit.plugins import deepgram as _deepgram_plugin
+from livekit.plugins import noise_cancellation as _nc_plugin
 
 from .api_client import ApiClient
 from .config import config
@@ -45,7 +46,14 @@ class GameModerator(Agent):
         self._trivia_flow: TriviaFlow | None = None
         self._quickdraw_flow: QuickDrawFlow | None = None
         self._renderer: VideoRenderer | None = None
-        self._answer_stt = _deepgram_plugin.STT(model="nova-3")
+        self._answer_stt = _deepgram_plugin.STT(
+            model="nova-3",
+            language="en",
+            smart_format=True,
+            endpointing_ms=300,
+            interim_results=True,
+            punctuate=True,
+        )
         self._stt_tasks: dict[str, asyncio.Task] = {}
 
     # -- lifecycle -------------------------------------------------------- #
@@ -210,7 +218,12 @@ class GameModerator(Agent):
         from livekit.agents import stt as _stt_types
         logger.info("starting STT stream for participant: %s", identity)
         stt_stream = self._answer_stt.stream()
-        audio_stream = rtc.AudioStream(track, sample_rate=16000, num_channels=1)
+        audio_stream = rtc.AudioStream(
+            track,
+            sample_rate=16000,
+            num_channels=1,
+            noise_cancellation=_nc_plugin.BVC(),
+        )
 
         async def _feed() -> None:
             async for ev in audio_stream:

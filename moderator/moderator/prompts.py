@@ -69,6 +69,7 @@ Determine if the player's answer is correct. Be GENEROUS — favour the player w
 - MOST IMPORTANT: If the transcript contains the expected answer (or an accepted alternative) as a recognisable word or phrase, mark it CORRECT — STT often appends phantom words (e.g. "Igneous fog" when the answer is "Igneous" → CORRECT)
 - Speech-to-text may introduce minor errors; judge the likely intended word, not the literal transcript
 - Accept phonetically similar words (e.g. "pari" → "Paris")
+- STT sometimes replaces the answer with a real English word that sounds alike (e.g. "night" for "Nile", "Rome" for "roam", "chilly" for "Chile"). Use the question context: if it's plausible the player said "{expected_answer}" and STT mis-heard it as this word, mark CORRECT.
 - Accept reasonable abbreviations or alternate phrasings
 - If the transcript is a full sentence, extract the core answer from it (e.g. "I think it is Paris" → "Paris")
 - The core concept must match the expected answer or an accepted alternative

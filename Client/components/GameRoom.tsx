@@ -163,7 +163,11 @@ function GameRoomInner({
     if (floorMuted && !pub.isMuted) {
       localParticipant.setMicrophoneEnabled(false);
     } else if (!floorMuted && pub.isMuted && state.status === "running" && !userMuted) {
-      localParticipant.setMicrophoneEnabled(true);
+      localParticipant.setMicrophoneEnabled(true, {
+        noiseSuppression: true,
+        echoCancellation: true,
+        autoGainControl: true,
+      });
     }
   }, [state.floor.mode, state.status, localParticipant, userMuted]);
 
@@ -171,7 +175,11 @@ function GameRoomInner({
     if (!localParticipant) return;
     const next = !userMuted;
     setUserMuted(next);
-    localParticipant.setMicrophoneEnabled(!next);
+    localParticipant.setMicrophoneEnabled(!next, {
+      noiseSuppression: true,
+      echoCancellation: true,
+      autoGainControl: true,
+    });
   }
 
   const floorLocked = state.floor.mode === "moderator_only";
