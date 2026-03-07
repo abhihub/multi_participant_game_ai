@@ -66,6 +66,7 @@ Also accept: {accept_also}
 Player said: "{transcript}"
 
 Determine if the player's answer is correct. Be GENEROUS — favour the player when in doubt.
+- MOST IMPORTANT: If the transcript contains the expected answer (or an accepted alternative) as a recognisable word or phrase, mark it CORRECT — STT often appends phantom words (e.g. "Igneous fog" when the answer is "Igneous" → CORRECT)
 - Speech-to-text may introduce minor errors; judge the likely intended word, not the literal transcript
 - Accept phonetically similar words (e.g. "pari" → "Paris")
 - Accept reasonable abbreviations or alternate phrasings

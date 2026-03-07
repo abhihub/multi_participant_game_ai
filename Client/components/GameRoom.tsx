@@ -15,7 +15,6 @@ import type { GameEventEnvelope } from "../lib/events";
 import type { EvModeratorSpeakStarted, EvScoreUpdated } from "../lib/events";
 import VideoGrid from "./VideoGrid";
 import GameControls from "./GameControls";
-import QuestionBanner from "./QuestionBanner";
 import EventLog from "./EventLog";
 import ConversationLog, { ConversationEntry } from "./ConversationLog";
 
@@ -246,8 +245,6 @@ function GameRoomInner({
               gap: 16,
             }}
           >
-            <QuestionBanner />
-
             <VideoGrid myIdentity={localParticipant?.identity ?? ""} />
 
             {isAdmin && (
