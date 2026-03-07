@@ -55,6 +55,7 @@ class GameModerator(Agent):
             punctuate=True,
         )
         self._stt_tasks: dict[str, asyncio.Task] = {}
+        self._active_tracks: dict[str, rtc.Track] = {}
 
     # -- lifecycle -------------------------------------------------------- #
 
@@ -79,6 +80,7 @@ class GameModerator(Agent):
             if (track.kind == rtc.TrackKind.KIND_AUDIO
                     and participant.identity != "moderator-ai"
                     and participant.identity not in self._stt_tasks):
+                self._active_tracks[participant.identity] = track
                 self._stt_tasks[participant.identity] = asyncio.create_task(
                     self._run_participant_stt(participant.identity, track)
                 )
@@ -90,6 +92,7 @@ class GameModerator(Agent):
                         and pub.kind == rtc.TrackKind.KIND_AUDIO
                         and p.identity != "moderator-ai"
                         and p.identity not in self._stt_tasks):
+                    self._active_tracks[p.identity] = pub.track
                     self._stt_tasks[p.identity] = asyncio.create_task(
                         self._run_participant_stt(p.identity, pub.track)
                     )
@@ -158,6 +161,7 @@ class GameModerator(Agent):
             with contextlib.suppress(asyncio.CancelledError):
                 await task
         self._stt_tasks.clear()
+        self._active_tracks.clear()
 
         # Stop any running flow
         if self._trivia_flow:
@@ -257,6 +261,37 @@ class GameModerator(Agent):
             feed_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await feed_task
+            self._stt_tasks.pop(identity, None)
+            self._active_tracks.pop(identity, None)
+
+    # -- STT rebuild ------------------------------------------------------ #
+
+    async def _rebuild_stt(self, keyterms: list[str]) -> None:
+        """Rebuild the shared STT instance with round-specific keyterms, then restart all participant STT tasks."""
+        logger.info("rebuild_stt keyterms=%r", keyterms)
+        self._answer_stt = _deepgram_plugin.STT(
+            model="nova-3",
+            language="en",
+            smart_format=True,
+            endpointing_ms=300,
+            interim_results=True,
+            punctuate=True,
+            keyterm=keyterms,
+        )
+        # Snapshot tracks BEFORE cancelling — the finally blocks in _run_participant_stt
+        # will pop from _active_tracks as tasks exit, leaving it empty otherwise.
+        tracks_snapshot = dict(self._active_tracks)
+        for task in list(self._stt_tasks.values()):
+            task.cancel()
+        for task in list(self._stt_tasks.values()):
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        self._stt_tasks.clear()
+        for identity, track in tracks_snapshot.items():
+            self._active_tracks[identity] = track  # restore after finally cleared them
+            self._stt_tasks[identity] = asyncio.create_task(
+                self._run_participant_stt(identity, track)
+            )
 
     # -- game flow -------------------------------------------------------- #
 
@@ -370,6 +405,7 @@ class GameModerator(Agent):
                     topic=topic,
                     difficulty=difficulty,
                     renderer=self._renderer,
+                    rebuild_stt=self._rebuild_stt,
                 )
                 await self._trivia_flow.run()
         except asyncio.CancelledError:

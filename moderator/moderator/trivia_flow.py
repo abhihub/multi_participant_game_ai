@@ -9,6 +9,7 @@ import logging
 import random
 import time
 from collections import deque
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -162,6 +163,7 @@ class TriviaFlow:
         topic: str = "General Knowledge",
         difficulty: str = "medium",
         renderer: VideoRenderer | None = None,
+        rebuild_stt: Callable[[list[str]], Awaitable[None]] | None = None,
     ) -> None:
         self._session = session
         self._api = api
@@ -170,6 +172,7 @@ class TriviaFlow:
         self._topic = topic
         self._difficulty = difficulty
         self._renderer = renderer
+        self._rebuild_stt = rebuild_stt
         self._running = False
         self._current_question: TriviaQuestion | None = None
         self._pending_answers: list[PendingAnswer] = []
@@ -315,6 +318,10 @@ class TriviaFlow:
             logger.info("using pre-fetched question: %s", question.question)
         else:
             question = await self._generate_question(round_id)
+
+        # Boost STT recognition for this round's answer before the floor opens
+        if self._rebuild_stt:
+            await self._rebuild_stt([question.answer] + question.accept_also)
 
         # Reset per-round state (before _current_question is set)
         self._pending_answers.clear()
