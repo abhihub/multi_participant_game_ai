@@ -1,4 +1,4 @@
-import { AccessToken, RoomServiceClient } from "livekit-server-sdk";
+import { AccessToken, AgentDispatchClient, RoomServiceClient } from "livekit-server-sdk";
 import { config } from "../config.js";
 import { generateSessionId, generateRoundId } from "../utils/ids.js";
 import { eventBus } from "./EventBus.js";
@@ -76,8 +76,8 @@ class SessionStore {
         const livekitHost = config.livekit.url
           .replace(/^wss:\/\//, "https://")
           .replace(/^ws:\/\//, "http://");
-        const svc = new RoomServiceClient(livekitHost, config.livekit.apiKey, config.livekit.apiSecret);
-        await svc.createRoom({
+        const roomSvc = new RoomServiceClient(livekitHost, config.livekit.apiKey, config.livekit.apiSecret);
+        await roomSvc.createRoom({
           name: req.livekit.room_name,
           metadata: JSON.stringify({ session_id: sessionId }),
         });
@@ -85,6 +85,22 @@ class SessionStore {
         // Non-fatal — room will be created lazily by LiveKit on first join,
         // but the moderator will fall back to using the room name as session ID.
         console.warn("Failed to pre-create LiveKit room with metadata:", err);
+      }
+
+      try {
+        const livekitHost = config.livekit.url
+          .replace(/^wss:\/\//, "https://")
+          .replace(/^ws:\/\//, "http://");
+        const dispatchSvc = new AgentDispatchClient(
+          livekitHost,
+          config.livekit.apiKey,
+          config.livekit.apiSecret,
+        );
+        await dispatchSvc.createDispatch(req.livekit.room_name, config.livekit.agentName, {
+          metadata: JSON.stringify({ session_id: sessionId }),
+        });
+      } catch (err) {
+        console.warn("Failed to dispatch LiveKit moderator agent:", err);
       }
     }
 
@@ -100,6 +116,13 @@ class SessionStore {
   findSessionByAdminToken(token: string): SessionState | undefined {
     for (const s of this.sessions.values()) {
       if (s.tokens.session_admin_token === token) return s;
+    }
+    return undefined;
+  }
+
+  findSessionByRoomName(roomName: string): SessionState | undefined {
+    for (const s of this.sessions.values()) {
+      if (s.livekit.room_name === roomName && s.status !== "ended") return s;
     }
     return undefined;
   }

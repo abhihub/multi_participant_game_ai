@@ -27,6 +27,18 @@ const AttachModeratorResponse = z.object({
   joined_at_ms: z.number().int().min(0),
 });
 
+const RoomNameParam = z.object({
+  room_name: z.string().min(1),
+});
+
+const SessionLookupResponse = z.object({
+  ok: z.literal(true),
+  session_id: z.string(),
+  status: z.string(),
+  game: z.enum(["trivia", "quick_draw"]),
+  room_name: z.string(),
+});
+
 export default async function internalControlRoutes(fastify: FastifyInstance) {
   const app = fastify.withTypeProvider<ZodTypeProvider>();
 
@@ -40,6 +52,29 @@ export default async function internalControlRoutes(fastify: FastifyInstance) {
       ok: true as const,
       version: "1.3.0",
       uptime_seconds: Math.floor((Date.now() - startTime) / 1000),
+    };
+  });
+
+  // GET /internal/v1/sessions/by-room/:room_name
+  app.get("/internal/v1/sessions/by-room/:room_name", {
+    schema: {
+      params: RoomNameParam,
+      response: { 200: SessionLookupResponse },
+    },
+    preHandler: [fastify.verifyInternal],
+  }, async (request) => {
+    const { room_name } = request.params;
+    const session = fastify.sessionStore.findSessionByRoomName(room_name);
+    if (!session) {
+      throw fastify.httpErrors.notFound("Session not found for room");
+    }
+
+    return {
+      ok: true as const,
+      session_id: session.id,
+      status: session.status,
+      game: session.game,
+      room_name: session.livekit.room_name,
     };
   });
 

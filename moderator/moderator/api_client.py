@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -77,6 +78,10 @@ class ApiClient:
         if game:
             body["game"] = game
         return await self._post(f"/internal/v1/sessions/{session_id}/attach", body)
+
+    async def find_session_by_room(self, room_name: str) -> dict[str, Any]:
+        """Resolve an active Game Engine session for an existing LiveKit room."""
+        return await self._get(f"/internal/v1/sessions/by-room/{quote(room_name, safe='')}")
 
     async def detach(self, session_id: str, reason: str | None = None) -> dict[str, Any]:
         """Unregister the moderator from a session."""

@@ -32,6 +32,9 @@ class Config:
 
     # Moderator identity
     moderator_identity: str = "moderator-ai"
+    agent_name: str = field(
+        default_factory=lambda: os.environ.get("LIVEKIT_AGENT_NAME", "pixo-game-moderator")
+    )
 
     # Timing defaults (ms)
     trivia_answer_timeout_ms: int = 7_500

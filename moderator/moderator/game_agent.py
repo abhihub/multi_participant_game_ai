@@ -461,8 +461,24 @@ class GameModerator(Agent):
                 room.name,
             )
 
-        # Fallback: room name may itself be the session_id (older rooms)
+        # Existing Pixo calls create the LiveKit room before the game session, so
+        # metadata may be missing. Resolve through the Game API by room name.
         room_name = room.name or ""
+        if room_name:
+            try:
+                result = await self._api.find_session_by_room(room_name)
+                session_id = result.get("session_id")
+                if session_id:
+                    logger.info(
+                        "resolved session_id=%s by room lookup (room=%s)",
+                        session_id,
+                        room_name,
+                    )
+                    return session_id
+            except Exception:
+                logger.debug("room lookup failed for room=%s", room_name, exc_info=True)
+
+        # Fallback: room name may itself be the session_id (older rooms)
         if room_name.startswith("sess_"):
             logger.info("using room name as session_id: %s", room_name)
             return room_name

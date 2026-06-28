@@ -20,6 +20,7 @@ from livekit.agents import AgentSession, JobContext, RoomInputOptions, WorkerOpt
 from livekit.plugins import openai  # noqa: E402
 
 from moderator.api_client import ApiClient  # noqa: E402
+from moderator.config import config  # noqa: E402
 from moderator.game_agent import GameModerator  # noqa: E402
 
 logger = logging.getLogger("moderator")
@@ -45,14 +46,31 @@ async def entrypoint(ctx: JobContext) -> None:
             session_id = json.loads(room_meta).get("session_id")
         except (ValueError, TypeError):
             pass
-    if not session_id:
-        session_id = room_name if room_name.startswith("sess_") else room_name
-
-    logger.info("pre-connect: room=%s session_id=%s", room_name, session_id)
-
     # --- 2. Poll snapshot API until session is "running" (or give up) ---
     api = ApiClient()
     try:
+        if not session_id and room_name:
+            if room_name.startswith("sess_"):
+                session_id = room_name
+            else:
+                try:
+                    result = await api.find_session_by_room(room_name)
+                    session_id = result.get("session_id")
+                    logger.info(
+                        "pre-connect: resolved session_id=%s by room lookup (room=%s)",
+                        session_id,
+                        room_name,
+                    )
+                except Exception:
+                    logger.debug(
+                        "pre-connect: room lookup failed for room=%s", room_name, exc_info=True
+                    )
+
+        if not session_id:
+            session_id = room_name
+
+        logger.info("pre-connect: room=%s session_id=%s", room_name, session_id)
+
         deadline = asyncio.get_event_loop().time() + 600.0
         while asyncio.get_event_loop().time() < deadline:
             try:
@@ -95,4 +113,4 @@ async def entrypoint(ctx: JobContext) -> None:
 
 
 if __name__ == "__main__":
-    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
+    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, agent_name=config.agent_name))
