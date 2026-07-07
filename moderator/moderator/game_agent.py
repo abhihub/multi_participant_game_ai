@@ -44,6 +44,7 @@ class GameModerator(Agent):
         self._game_type: str | None = None
         self._events: EventBroadcaster | None = None
         self._flow_task: asyncio.Task[None] | None = None
+        self._lifecycle_task: asyncio.Task[None] | None = None
         self._trivia_flow: TriviaFlow | None = None
         self._quickdraw_flow: QuickDrawFlow | None = None
         self._renderer: VideoRenderer | None = None
@@ -121,6 +122,7 @@ class GameModerator(Agent):
 
         # Set up event broadcaster
         self._events = EventBroadcaster(room, session_id)
+        self._lifecycle_task = asyncio.create_task(self._watch_session_lifecycle())
 
         # Create and publish the canvas video HUD track
         self._renderer = VideoRenderer()
@@ -186,6 +188,15 @@ class GameModerator(Agent):
         if self._quickdraw_flow:
             self._quickdraw_flow.stop()
 
+        if (self._lifecycle_task
+                and not self._lifecycle_task.done()
+                and self._lifecycle_task is not asyncio.current_task()):
+            self._lifecycle_task.cancel()
+            try:
+                await self._lifecycle_task
+            except asyncio.CancelledError:
+                pass
+
         if self._flow_task and not self._flow_task.done():
             self._flow_task.cancel()
             try:
@@ -202,6 +213,31 @@ class GameModerator(Agent):
                 logger.exception("failed to detach from session %s", self._session_id)
 
         await self._api.close()
+
+    async def _watch_session_lifecycle(self, poll_interval_s: float = 2.0) -> None:
+        """Leave LiveKit when the Game API session is ended externally."""
+        if not self._session_id:
+            return
+
+        while True:
+            await asyncio.sleep(poll_interval_s)
+            try:
+                snap = await self._api.get_snapshot(self._session_id)
+                status = snap.get("status", "created")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("session lifecycle poll failed", exc_info=True)
+                continue
+
+            if status in ("ended", "error"):
+                logger.info(
+                    "session %s reached %s; disconnecting moderator from LiveKit",
+                    self._session_id,
+                    status,
+                )
+                await self._ctx.room.disconnect()
+                return
 
     # -- STT callback ----------------------------------------------------- #
 
